@@ -9,8 +9,8 @@ compte qui possède le projet) : le temps mesuré est celui d'une recherche qui
 interroge vraiment les sources. --keep-cache saute cette suppression.
 
 Se connecte avec le compte de test A (TEST_USER_A_* dans .env.local, créé par
-verify_backend.py). Chaque recherche coûte 11 unités de la limite par
-utilisateur (300 par minute) : le jeu entier en prend une centaine.
+verify_backend.py). Chaque recherche qui interroge les sources coûte 10 unités
+de la limite par utilisateur (300 par minute) : le jeu entier en prend 90.
 
 Les critères attendus sont contrôlés à la fin (OK / ÉCHEC) ; le script sort
 avec le code 1 si l'un d'eux échoue.
@@ -72,7 +72,7 @@ REF = URL.split("//", 1)[1].split(".", 1)[0]
 
 def fold(s):
     """Minuscules sans accents, comme normalizeQuery dans search-books."""
-    s = unicodedata.normalize("NFKD", s.lower())
+    s = unicodedata.normalize("NFKD", s.lower().replace("œ", "oe").replace("æ", "ae"))
     s = "".join(c for c in s if not unicodedata.category(c).startswith("M"))
     return re.sub(r"[\W_]+", " ", s).strip()
 

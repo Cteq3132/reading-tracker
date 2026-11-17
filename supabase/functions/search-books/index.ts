@@ -243,13 +243,13 @@ async function searchExternal(
       })
       : none,
     input.kind === "isbn"
-      ? withSource("bnf", timeout, (s) => searchBnf(input, s).then(plain))
+      ? withSource("bnf", timeout, (s) => searchBnf(input, s).then(withoutSignals))
       : none,
     input.kind === "isbn"
       ? withSource(
         "openlibrary",
         timeout,
-        (s) => openLibraryByIsbn(input.isbn13, input.isbn10, s).then(plain),
+        (s) => openLibraryByIsbn(input.isbn13, input.isbn10, s).then(withoutSignals),
       )
       : none,
   ]);
@@ -530,7 +530,7 @@ function parseInput(body: unknown): SearchInput | { error: string } {
 // Un candidat et les signaux de classement que sa source fournit.
 type BookHit = Hit<BookCandidate>;
 
-const plain = (candidates: BookCandidate[]): BookHit[] =>
+const withoutSignals = (candidates: BookCandidate[]): BookHit[] =>
   candidates.map((candidate) => ({ candidate, signals: {} }));
 
 // Chaque source a son propre délai ; une erreur ou un dépassement donne null.
@@ -787,7 +787,7 @@ async function searchHardcover(
       token,
       signal,
     ) as { editions?: HardcoverEdition[] } | null;
-    return plain((data?.editions ?? []).flatMap((e) => {
+    return withoutSignals((data?.editions ?? []).flatMap((e) => {
       const c = hardcoverEditionToCandidate(e);
       return c ? [c] : [];
     }));

@@ -162,3 +162,40 @@ test("mention d'édition : le titre propre est retenu", () => {
   }, "dune");
   assert.equal(ranked[0].best.id, "h-dune");
 });
+
+test("« profil d'une œuvre » est reconnu malgré la ligature", () => {
+  assert.equal(fold("Profil d'une œuvre"), "profil d une oeuvre");
+  const ranked = rankText({
+    google: [
+      google(book("g-profil", "L'Étranger - Profil d'une œuvre", ["Pierre-Louis Rey"], fr)),
+      google(book("g-camus", "L'étranger", ["Albert Camus"], { language: "fr" })),
+    ],
+    hardcover: [],
+  }, "l'étranger");
+  assert.equal(ranked[0].best.id, "g-camus");
+});
+
+test("deux tomes ne fusionnent pas", () => {
+  const ranked = rankText({
+    google: [
+      google(book("t1", "L'Arabe du futur (Tome 1)", ["Riad Sattouf"], fr)),
+      google(book("t2", "L'Arabe du futur (Tome 2)", ["Riad Sattouf"], fr)),
+    ],
+    hardcover: [],
+  }, "l'arabe du futur");
+  assert.equal(ranked.length, 2);
+});
+
+test("un roman au titre ambigu n'est pas pris pour un guide", () => {
+  const ranked = rankText({
+    google: [
+      google(book("g-etude", "Une étude en rouge", ["Arthur Conan Doyle"], fr), ["Fiction"]),
+      google(book("g-jeunesse", "Le petit Nicolas", ["Sempé"], fr), ["Juvenile Fiction / School & Education"]),
+      google(book("g-commentaire", "Sherlock Holmes : étude et commentaire", ["Jean Prof"], fr)),
+    ],
+    hardcover: [],
+  }, "sherlock holmes");
+  const score = (id: string) => ranked.find((g) => g.best.id === id)!.score;
+  assert.ok(score("g-etude") > score("g-commentaire") + 20);
+  assert.ok(score("g-jeunesse") > score("g-commentaire") + 20);
+});
