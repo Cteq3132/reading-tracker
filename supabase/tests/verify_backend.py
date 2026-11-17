@@ -326,156 +326,184 @@ check("friends_activity refusée sans session", status in (401, 403) or res == [
 # 7. Unshelf : PAL, historique des statuts, objectif ---------------------------
 # Les événements s'accumulent d'un lancement à l'autre (les suppressions de la
 # remise à zéro en créent aussi) : on ne regarde que ceux créés après ce point.
-def ts(value):
+def parse_ts(value):
     return datetime.fromisoformat(value)
+
+
+def rows(path, token):
+    """GET qui doit réussir : sinon l'erreur interrompt la section (contrôle en échec)."""
+    status, res = call("GET", path, token)
+    if status != 200 or not isinstance(res, list):
+        raise ValueError(f"GET {path.split('?')[0]} → HTTP {status} {show(res)[:200]}")
+    return res
 
 
 def events_of(token, user_id, after_id, book=None):
     q = f"/rest/v1/user_book_events?user_id=eq.{user_id}&id=gt.{after_id}&order=id&select=*"
     if book:
         q += f"&book_id=eq.{book}"
-    return call("GET", q, token)
+    return rows(q, token)
+
+
+def last_event_id(token, user_id):
+    last = rows(f"/rest/v1/user_book_events?user_id=eq.{user_id}&order=id.desc&limit=1&select=id", token)
+    return last[0]["id"] if last else 0
 
 
 def transitions(events):
     return [f"{e['from_status'] or '∅'}→{e['to_status'] or '∅'}" for e in events]
 
 
-status, res = call("GET", f"/rest/v1/user_book_events?user_id=eq.{A['id']}&order=id.desc&limit=1&select=id", A["token"])
-last_event = res[0]["id"] if status == 200 and res else 0
-status, res = call("GET", f"/rest/v1/user_books?user_id=eq.{A['id']}&book_id=eq.{book_id}&select=*", A["token"])
-ub_a = res[0]
-status, res = call("GET", f"/rest/v1/user_book_events?user_book_id=eq.{ub_a['id']}&select=*", A["token"])
-print("événements du Yoga de A :", show(res))
-check("insertion en to_read : événement ∅→to_read, status_changed_at = created_at",
-      status == 200 and transitions(res) == ["∅→to_read"] and res[0]["book_id"] == book_id
-      and ts(res[0]["occurred_at"]) == ts(ub_a["status_changed_at"]) == ts(ub_a["created_at"]), show(ub_a))
+def section_unshelf_rest():
+    last_event = last_event_id(A["token"], A["id"])
+    ub_a = rows(f"/rest/v1/user_books?user_id=eq.{A['id']}&book_id=eq.{book_id}&select=*", A["token"])[0]
+    res = rows(f"/rest/v1/user_book_events?user_book_id=eq.{ub_a['id']}&select=*", A["token"])
+    print("événements du Yoga de A :", show(res))
+    check("insertion en to_read : événement ∅→to_read, status_changed_at = created_at",
+          transitions(res) == ["∅→to_read"] and res[0]["book_id"] == book_id
+          and parse_ts(res[0]["occurred_at"]) == parse_ts(ub_a["status_changed_at"]) == parse_ts(ub_a["created_at"]), show(ub_a))
 
-status, res = call("POST", "/rest/v1/user_books", A["token"],
-                   {"book_id": test_id, "status": "to_read", "status_changed_at": "2000-01-01T00:00:00Z"},
-                   {"Prefer": "return=representation"})
-ub_t = res[0] if status == 201 else None
-check("status_changed_at envoyé par le client ignoré à l'insertion",
-      ub_t is not None and ts(ub_t["status_changed_at"]).year > 2000, show(res))
-
-time.sleep(1.1)
-status, res = call("PATCH", f"/rest/v1/user_books?id=eq.{ub_t['id']}", A["token"],
-                   {"rating": 4, "status_changed_at": "2000-01-01T00:00:00Z"}, {"Prefer": "return=representation"})
-status_e, ev = events_of(A["token"], A["id"], last_event, test_id)
-check("mise à jour sans changement de statut : status_changed_at inchangé (valeur envoyée ignorée), aucun événement",
-      status == 200 and res[0]["status_changed_at"] == ub_t["status_changed_at"]
-      and ts(res[0]["updated_at"]) > ts(ub_t["updated_at"]) and transitions(ev) == ["∅→to_read"],
-      f"{show(res)} {transitions(ev)}")
-
-status, res = call("PATCH", f"/rest/v1/user_books?id=eq.{ub_a['id']}", A["token"], {"status": "reading"},
-                   {"Prefer": "return=representation"})
-moved = res[0] if status == 200 and res else {}
-status_e, ev = call("GET", f"/rest/v1/user_book_events?user_book_id=eq.{ub_a['id']}&order=id&select=*", A["token"])
-check("passage to_read → reading : sortie de PAL, status_changed_at avancé, started_at posé par l'autre trigger",
-      moved.get("status") == "reading" and ts(moved["status_changed_at"]) > ts(ub_a["status_changed_at"])
-      and moved["started_at"] is not None and transitions(ev) == ["∅→to_read", "to_read→reading"]
-      and ts(ev[-1]["occurred_at"]) == ts(moved["status_changed_at"]), f"{show(moved)} {transitions(ev)}")
-
-time.sleep(1.1)
-status, res = call("PATCH", f"/rest/v1/user_books?id=eq.{ub_t['id']}", A["token"], {"status": "released"},
-                   {"Prefer": "return=representation"})
-released = res[0] if status == 200 and res else {}
-check("passage to_read → released (Libérer) accepté, status_changed_at avancé",
-      released.get("status") == "released" and ts(released["status_changed_at"]) > ts(ub_t["status_changed_at"])
-      and released["started_at"] is None and released["finished_at"] is None, show(res))
-status, res = call("POST", "/rest/v1/user_books", B["token"], {"book_id": test_id, "status": "wishlist"},
-                   {"Prefer": "return=representation"})
-check("statut wishlist accepté (Envies)", status == 201 and res[0]["status"] == "wishlist", show(res))
-status, res = call("POST", "/rest/v1/user_books", B["token"], {"book_id": book_id, "status": "possédé"})
-check("statut inconnu refusé", status == 400, f"HTTP {status}")
-
-status, _ = call("DELETE", f"/rest/v1/user_books?id=eq.{ub_t['id']}", A["token"])
-status, res = call("POST", "/rest/v1/user_books", A["token"], {"book_id": test_id, "status": "to_read"},
-                   {"Prefer": "return=representation"})
-again = res[0]["id"] if status == 201 else None
-status, _ = call("DELETE", f"/rest/v1/user_books?id=eq.{again}", A["token"])
-status_e, ev = events_of(A["token"], A["id"], last_event, test_id)
-print("événements de la fiche de test (A) :", transitions(ev), [e["user_book_id"] for e in ev])
-check("suppressions : released→∅ puis, ligne to_read supprimée, to_read→∅ ; user_book_id passé à null",
-      transitions(ev) == ["∅→to_read", "to_read→released", "released→∅", "∅→to_read", "to_read→∅"]
-      and all(e["user_book_id"] is None for e in ev), show(ev)[:400])
-status_e, ev = events_of(A["token"], A["id"], last_event)
-entries = sum(e["to_status"] == "to_read" for e in ev)
-exits = sum(e["from_status"] == "to_read" for e in ev)
-print(f"bilan de A depuis le début de la section : {entries} entrées, {exits} sorties de PAL")
-check("bilan calculable depuis les événements : 2 entrées en PAL, 3 sorties (reading, released, suppression)",
-      entries == 2 and exits == 3, transitions(ev))
-
-# Droits sur user_book_events. Ici : A public, B privé, A suit B (accepté).
-status, res = call("GET", f"/rest/v1/user_book_events?user_id=eq.{A['id']}&select=id", B["token"])
-check("B voit les événements de A (profil public)", status == 200 and len(res) > 0, f"HTTP {status} {len(res or [])}")
-status, res = call("GET", f"/rest/v1/user_book_events?user_id=eq.{B['id']}&select=id", A["token"])
-check("A voit les événements de B (privé, follow accepté)", status == 200 and len(res) > 0, f"HTTP {status}")
-call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"is_private": True})
-try:
-    status, res = call("GET", f"/rest/v1/user_book_events?user_id=eq.{A['id']}&select=id", B["token"])
-    check("A passe en privé : B ne voit plus ses événements (pas de follow)", status == 200 and res == [], show(res))
-    status, res = call("POST", "/rest/v1/follows", B["token"], {"follower_id": B["id"], "following_id": A["id"]},
+    status, res = call("POST", "/rest/v1/user_books", A["token"],
+                       {"book_id": test_id, "status": "to_read", "status_changed_at": "2000-01-01T00:00:00Z"},
                        {"Prefer": "return=representation"})
-    status, res = call("GET", f"/rest/v1/user_book_events?user_id=eq.{A['id']}&select=id", B["token"])
-    check("follow B→A pending : toujours rien", status == 200 and res == [], show(res))
-    call("PATCH", f"/rest/v1/follows?follower_id=eq.{B['id']}&following_id=eq.{A['id']}", A["token"],
-         {"status": "accepted"})
-    status, res = call("GET", f"/rest/v1/user_book_events?user_id=eq.{A['id']}&select=id", B["token"])
-    check("follow B→A accepté : B voit les événements de A", status == 200 and len(res) > 0, f"HTTP {status}")
-finally:
-    call("DELETE", f"/rest/v1/follows?follower_id=eq.{B['id']}&following_id=eq.{A['id']}", B["token"])
-    call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"is_private": False})
-status, res = call("GET", "/rest/v1/user_book_events?select=id&limit=1")
-check("user_book_events refusée sans session", status in (401, 403) or res == [], f"HTTP {status} {show(res)}")
+    ub_t = res[0] if status == 201 else None
+    check("status_changed_at envoyé par le client ignoré à l'insertion",
+          ub_t is not None and parse_ts(ub_t["status_changed_at"]).year > 2000, show(res))
 
-status, res = call("POST", "/rest/v1/user_book_events", A["token"],
-                   {"user_id": A["id"], "book_id": book_id, "from_status": None, "to_status": "to_read"})
-check("insertion directe dans user_book_events refusée", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
-status, mine = call("GET", f"/rest/v1/user_book_events?user_id=eq.{A['id']}&order=id.desc&limit=1&select=id", A["token"])
-status, res = call("PATCH", f"/rest/v1/user_book_events?id=eq.{mine[0]['id']}", A["token"], {"to_status": "read"},
-                   {"Prefer": "return=representation"})
-check("modification directe d'un événement refusée, même le sien", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
-status, res = call("DELETE", f"/rest/v1/user_book_events?id=eq.{mine[0]['id']}", A["token"],
-                   headers={"Prefer": "return=representation"})
-check("suppression directe d'un événement refusée, même le sien", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
+    time.sleep(1.1)
+    status, res = call("PATCH", f"/rest/v1/user_books?id=eq.{ub_t['id']}", A["token"],
+                       {"rating": 4, "status_changed_at": "2000-01-01T00:00:00Z"}, {"Prefer": "return=representation"})
+    ev = events_of(A["token"], A["id"], last_event, test_id)
+    check("mise à jour sans changement de statut : status_changed_at inchangé (valeur envoyée ignorée), aucun événement",
+          status == 200 and res[0]["status_changed_at"] == ub_t["status_changed_at"]
+          and parse_ts(res[0]["updated_at"]) > parse_ts(ub_t["updated_at"]) and transitions(ev) == ["∅→to_read"],
+          f"{show(res)} {transitions(ev)}")
 
-# Objectif PAL. A a une PAL de 1 livre ici (le Yoga est passé en reading) : on
-# en ajoute un pour que la taille de départ ne soit pas un hasard.
-status, res = call("POST", "/rest/v1/user_books", A["token"], {"book_id": test_id, "status": "to_read"},
-                   {"Prefer": "return=representation"})
-status, pal = call("GET", f"/rest/v1/user_books?user_id=eq.{A['id']}&status=eq.to_read&select=id", A["token"])
-status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"],
-                   {"pal_goal_target": 0, "pal_goal_deadline": "2027-06-30"}, {"Prefer": "return=representation"})
-goal = res[0] if status == 200 and res else {}
-print(f"objectif de A (PAL de {len(pal)}) :",
-      show({k: v for k, v in goal.items() if k.startswith("pal_goal")}))
-check("objectif PAL : start_size = taille de la PAL, set_at posé, échéance gardée",
-      goal.get("pal_goal_target") == 0 and goal.get("pal_goal_start_size") == len(pal) >= 1
-      and goal.get("pal_goal_set_at") is not None and goal.get("pal_goal_deadline") == "2027-06-30", show(goal))
-for col, value in (("pal_goal_start_size", 99), ("pal_goal_set_at", "2000-01-01T00:00:00Z")):
-    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {col: value})
-    check(f"{col} non modifiable par le client", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
-status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"pal_goal_deadline": None},
-                   {"Prefer": "return=representation"})
-check("changer l'échéance seule ne touche ni start_size ni set_at",
-      status == 200 and res[0]["pal_goal_start_size"] == goal["pal_goal_start_size"]
-      and res[0]["pal_goal_set_at"] == goal["pal_goal_set_at"], show(res))
-status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"pal_goal_target": -1})
-check("objectif PAL négatif refusé", status == 400, f"HTTP {status}")
-call("DELETE", f"/rest/v1/user_books?user_id=eq.{A['id']}&book_id=eq.{test_id}", A["token"])
-status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"pal_goal_target": 1},
-                   {"Prefer": "return=representation"})
-check("nouvelle cible : start_size recalculé sur la PAL du moment",
-      status == 200 and res[0]["pal_goal_start_size"] == len(pal) - 1
-      and ts(res[0]["pal_goal_set_at"]) > ts(goal["pal_goal_set_at"]), show(res))
-status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{B['id']}", A["token"], {"pal_goal_target": 3},
-                   {"Prefer": "return=representation"})
-check("A ne peut pas fixer l'objectif de B", status == 200 and res == [], show(res))
-status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"pal_goal_target": None},
-                   {"Prefer": "return=representation"})
-check("objectif retiré : start_size et set_at remis à null",
-      status == 200 and res[0]["pal_goal_start_size"] is None and res[0]["pal_goal_set_at"] is None, show(res))
+    status, res = call("PATCH", f"/rest/v1/user_books?id=eq.{ub_a['id']}", A["token"], {"status": "reading"},
+                       {"Prefer": "return=representation"})
+    moved = res[0] if status == 200 and res else {}
+    ev = rows(f"/rest/v1/user_book_events?user_book_id=eq.{ub_a['id']}&order=id&select=*", A["token"])
+    check("passage to_read → reading : sortie de PAL, status_changed_at avancé, started_at posé par l'autre trigger",
+          moved.get("status") == "reading" and parse_ts(moved["status_changed_at"]) > parse_ts(ub_a["status_changed_at"])
+          and moved["started_at"] is not None and transitions(ev) == ["∅→to_read", "to_read→reading"]
+          and parse_ts(ev[-1]["occurred_at"]) == parse_ts(moved["status_changed_at"]), f"{show(moved)} {transitions(ev)}")
+
+    time.sleep(1.1)
+    status, res = call("PATCH", f"/rest/v1/user_books?id=eq.{ub_t['id']}", A["token"], {"status": "released"},
+                       {"Prefer": "return=representation"})
+    released = res[0] if status == 200 and res else {}
+    check("passage to_read → released (Libérer) accepté, status_changed_at avancé",
+          released.get("status") == "released" and parse_ts(released["status_changed_at"]) > parse_ts(ub_t["status_changed_at"])
+          and released["started_at"] is None and released["finished_at"] is None, show(res))
+    status, res = call("POST", "/rest/v1/user_books", B["token"], {"book_id": test_id, "status": "wishlist"},
+                       {"Prefer": "return=representation"})
+    wish = res[0] if status == 201 else {}
+    check("statut wishlist accepté (Envies)", wish.get("status") == "wishlist", show(res))
+    time.sleep(1.1)
+    status, res = call("PATCH", f"/rest/v1/user_books?id=eq.{wish['id']}", B["token"], {"status": "to_read"},
+                       {"Prefer": "return=representation"})
+    ev = rows(f"/rest/v1/user_book_events?user_book_id=eq.{wish['id']}&order=id&select=*", B["token"])
+    check("passage wishlist → to_read (livre acheté) : entrée en PAL par mise à jour, status_changed_at avancé",
+          status == 200 and transitions(ev) == ["∅→wishlist", "wishlist→to_read"]
+          and parse_ts(res[0]["status_changed_at"]) > parse_ts(wish["status_changed_at"])
+          and parse_ts(ev[-1]["occurred_at"]) == parse_ts(res[0]["status_changed_at"]), f"{show(res)} {transitions(ev)}")
+    status, res = call("POST", "/rest/v1/user_books", B["token"], {"book_id": book_id, "status": "possédé"})
+    check("statut inconnu refusé", status == 400, f"HTTP {status}")
+
+    status, _ = call("DELETE", f"/rest/v1/user_books?id=eq.{ub_t['id']}", A["token"])
+    status, res = call("POST", "/rest/v1/user_books", A["token"], {"book_id": test_id, "status": "to_read"},
+                       {"Prefer": "return=representation"})
+    again = res[0]["id"] if status == 201 else None
+    status, _ = call("DELETE", f"/rest/v1/user_books?id=eq.{again}", A["token"])
+    ev = events_of(A["token"], A["id"], last_event, test_id)
+    print("événements de la fiche de test (A) :", transitions(ev), [e["user_book_id"] for e in ev])
+    check("suppressions : released→∅ puis, ligne to_read supprimée, to_read→∅ ; user_book_id passé à null",
+          transitions(ev) == ["∅→to_read", "to_read→released", "released→∅", "∅→to_read", "to_read→∅"]
+          and all(e["user_book_id"] is None for e in ev), show(ev)[:400])
+    ev = events_of(A["token"], A["id"], last_event)
+    entries = sum(e["to_status"] == "to_read" for e in ev)
+    exits = sum(e["from_status"] == "to_read" for e in ev)
+    print(f"bilan de A depuis le début de la section : {entries} entrées, {exits} sorties de PAL")
+    check("bilan calculable depuis les événements : 2 entrées en PAL, 3 sorties (reading, released, suppression)",
+          entries == 2 and exits == 3, transitions(ev))
+
+    # Droits sur user_book_events. Ici : A public, B privé, A suit B (accepté).
+    status, res = call("GET", f"/rest/v1/user_book_events?user_id=eq.{A['id']}&select=id", B["token"])
+    check("B voit les événements de A (profil public)", status == 200 and len(res) > 0, f"HTTP {status} {len(res or [])}")
+    status, res = call("GET", f"/rest/v1/user_book_events?user_id=eq.{B['id']}&select=id", A["token"])
+    check("A voit les événements de B (privé, follow accepté)", status == 200 and len(res) > 0, f"HTTP {status}")
+    call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"is_private": True})
+    try:
+        status, res = call("GET", f"/rest/v1/user_book_events?user_id=eq.{A['id']}&select=id", B["token"])
+        check("A passe en privé : B ne voit plus ses événements (pas de follow)", status == 200 and res == [], show(res))
+        status, res = call("POST", "/rest/v1/follows", B["token"], {"follower_id": B["id"], "following_id": A["id"]},
+                           {"Prefer": "return=representation"})
+        status, res = call("GET", f"/rest/v1/user_book_events?user_id=eq.{A['id']}&select=id", B["token"])
+        check("follow B→A pending : toujours rien", status == 200 and res == [], show(res))
+        call("PATCH", f"/rest/v1/follows?follower_id=eq.{B['id']}&following_id=eq.{A['id']}", A["token"],
+             {"status": "accepted"})
+        status, res = call("GET", f"/rest/v1/user_book_events?user_id=eq.{A['id']}&select=id", B["token"])
+        check("follow B→A accepté : B voit les événements de A", status == 200 and len(res) > 0, f"HTTP {status}")
+    finally:
+        call("DELETE", f"/rest/v1/follows?follower_id=eq.{B['id']}&following_id=eq.{A['id']}", B["token"])
+        call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"is_private": False})
+    status, res = call("GET", "/rest/v1/user_book_events?select=id&limit=1")
+    check("user_book_events refusée sans session", status in (401, 403) or res == [], f"HTTP {status} {show(res)}")
+
+    status, res = call("POST", "/rest/v1/user_book_events", A["token"],
+                       {"user_id": A["id"], "book_id": book_id, "from_status": None, "to_status": "to_read"})
+    check("insertion directe dans user_book_events refusée", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
+    mine = last_event_id(A["token"], A["id"])
+    status, res = call("PATCH", f"/rest/v1/user_book_events?id=eq.{mine}", A["token"], {"to_status": "read"},
+                       {"Prefer": "return=representation"})
+    check("modification directe d'un événement refusée, même le sien", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
+    status, res = call("DELETE", f"/rest/v1/user_book_events?id=eq.{mine}", A["token"],
+                       headers={"Prefer": "return=representation"})
+    check("suppression directe d'un événement refusée, même le sien", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
+
+    # Objectif PAL. A a une PAL de 1 livre ici (le Yoga est passé en reading) : on
+    # en ajoute un pour que la taille de départ ne soit pas un hasard.
+    status, res = call("POST", "/rest/v1/user_books", A["token"], {"book_id": test_id, "status": "to_read"},
+                       {"Prefer": "return=representation"})
+    status, pal = call("GET", f"/rest/v1/user_books?user_id=eq.{A['id']}&status=eq.to_read&select=id", A["token"])
+    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"],
+                       {"pal_goal_target": 0, "pal_goal_deadline": "2027-06-30"}, {"Prefer": "return=representation"})
+    goal = res[0] if status == 200 and res else {}
+    print(f"objectif de A (PAL de {len(pal)}) :",
+          show({k: v for k, v in goal.items() if k.startswith("pal_goal")}))
+    check("objectif PAL : start_size = taille de la PAL, set_at posé, échéance gardée",
+          goal.get("pal_goal_target") == 0 and goal.get("pal_goal_start_size") == len(pal) >= 1
+          and goal.get("pal_goal_set_at") is not None and goal.get("pal_goal_deadline") == "2027-06-30", show(goal))
+    for col, value in (("pal_goal_start_size", 99), ("pal_goal_set_at", "2000-01-01T00:00:00Z")):
+        status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {col: value})
+        check(f"{col} non modifiable par le client", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
+    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"pal_goal_deadline": None},
+                       {"Prefer": "return=representation"})
+    check("changer l'échéance seule ne touche ni start_size ni set_at",
+          status == 200 and res[0]["pal_goal_start_size"] == goal["pal_goal_start_size"]
+          and res[0]["pal_goal_set_at"] == goal["pal_goal_set_at"], show(res))
+    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"pal_goal_target": -1})
+    check("objectif PAL négatif refusé", status == 400, f"HTTP {status}")
+    call("DELETE", f"/rest/v1/user_books?user_id=eq.{A['id']}&book_id=eq.{test_id}", A["token"])
+    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"pal_goal_target": 1},
+                       {"Prefer": "return=representation"})
+    check("nouvelle cible : start_size recalculé sur la PAL du moment",
+          status == 200 and res[0]["pal_goal_start_size"] == len(pal) - 1
+          and parse_ts(res[0]["pal_goal_set_at"]) > parse_ts(goal["pal_goal_set_at"]), show(res))
+    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{B['id']}", A["token"], {"pal_goal_target": 3},
+                       {"Prefer": "return=representation"})
+    check("A ne peut pas fixer l'objectif de B", status == 200 and res == [], show(res))
+    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"pal_goal_target": None},
+                       {"Prefer": "return=representation"})
+    check("objectif retiré : start_size et set_at remis à null",
+          status == 200 and res[0]["pal_goal_start_size"] is None and res[0]["pal_goal_set_at"] is None, show(res))
+
+
+try:
+    section_unshelf_rest()
+except (KeyError, IndexError, TypeError, ValueError) as error:
+    check("section Unshelf interrompue par une réponse inattendue", False, repr(error)[:300])
+
 
 # 8. Limites de débit de search-books -----------------------------------------
 # Les seuils réels restent en place : on pré-remplit les compteurs du compte A
@@ -666,8 +694,9 @@ def section_unshelf_sql():
     # Reprise de l'existant : chaque ligne, reprise ou créée depuis, a un
     # événement d'origine ∅→statut daté de son created_at (la migration l'a posé
     # pour les lignes existantes, le trigger pour les nouvelles), et son dernier
-    # événement donne son statut actuel et son status_changed_at.
-    rows = sql(f"""
+    # événement donne son statut actuel et son status_changed_at. Le projet a
+    # au moins une ligne d'un vrai compte antérieure à la migration : others ≥ 1.
+    library = sql(f"""
       with last as (
         select distinct on (e.user_book_id) e.user_book_id, e.to_status, e.occurred_at
           from public.user_book_events e where e.user_book_id is not null
@@ -680,13 +709,17 @@ def section_unshelf_sql():
              (select count(*) from public.user_book_events o where o.user_book_id = ub.id) > 1
                or ub.status_changed_at = ub.created_at as single_ok
         from public.user_books ub left join last l on l.user_book_id = ub.id""")
-    bad = [r for r in rows if not (r["origin_ok"] and r["last_ok"] and r["single_ok"])]
-    others = sum(r["other_account"] for r in rows)
-    print(f"reprise : {len(rows)} lignes de user_books, dont {others} hors comptes de test ; incohérentes : {len(bad)}")
+    bad = [r for r in library if not (r["origin_ok"] and r["last_ok"] and r["single_ok"])]
+    others = sum(r["other_account"] for r in library)
+    print(f"reprise : {len(library)} lignes de user_books, dont {others} hors comptes de test ; incohérentes : {len(bad)}")
     check("reprise de l'existant : chaque user_books a son événement ∅→statut daté de created_at, "
           "et son dernier événement donne status et status_changed_at",
-          rows and others >= 1 and not bad, show(bad)[:300])
+          library and others >= 1 and not bad, show(bad)[:300])
 
+    # Les comptes de test ne laissent pas d'historique orphelin en prod : les
+    # événements des lignes supprimées (user_book_id null) sont effacés.
+    sql(f"delete from public.user_book_events where user_book_id is null "
+        f"and user_id in ('{A['id']}', '{B['id']}')", write=True)
 
 try:
     section_unshelf_sql()
