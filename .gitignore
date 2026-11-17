@@ -5,3 +5,4 @@ DerivedData/
 build/
 supabase/.temp/
 supabase/.branches/
+ios/Config/Secrets.xcconfig

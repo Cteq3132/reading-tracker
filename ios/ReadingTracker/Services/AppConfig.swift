@@ -2,11 +2,11 @@ import Foundation
 import Supabase
 
 enum AppConfig {
-  /// URL du projet, construite depuis `SUPABASE_HOST` (Config/Supabase.xcconfig → Info.plist).
+  /// URL du projet, construite depuis `SUPABASE_HOST` (Config/Secrets.xcconfig → Supabase.xcconfig → Info.plist).
   static let supabaseURL: URL = {
     let host = Bundle.main.object(forInfoDictionaryKey: "SupabaseHost") as? String ?? ""
     guard !host.isEmpty, let url = URL(string: "https://\(host)") else {
-      fatalError("SupabaseHost manquant : vérifier Config/Supabase.xcconfig")
+      fatalError("SupabaseHost manquant : créer Config/Secrets.xcconfig depuis Secrets.example.xcconfig")
     }
     return url
   }()
@@ -14,7 +14,7 @@ enum AppConfig {
   /// Clé publishable : prévue pour le client, ses droits sont bornés par la RLS.
   static let supabaseKey: String = {
     let key = Bundle.main.object(forInfoDictionaryKey: "SupabasePublishableKey") as? String ?? ""
-    guard !key.isEmpty else { fatalError("SupabasePublishableKey manquant : vérifier Config/Supabase.xcconfig") }
+    guard !key.isEmpty else { fatalError("SupabasePublishableKey manquant : créer Config/Secrets.xcconfig depuis Secrets.example.xcconfig") }
     return key
   }()
 

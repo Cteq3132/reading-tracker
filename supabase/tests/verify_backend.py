@@ -3,7 +3,9 @@
     python3 supabase/tests/verify_backend.py
 
 Au premier lancement, crée deux comptes de test (A et B) et note leurs
-identifiants dans .env.local (non versionné, jamais affichés). Ensuite, se
+identifiants dans .env.local (non versionné, jamais affichés).
+SUPABASE_URL et SUPABASE_PUBLISHABLE_KEY viennent de l'environnement ou de
+.env.local. Ensuite, se
 reconnecte avec ces comptes et remet leurs données à zéro avant de rejouer les
 contrôles de docs/CONTRAT.md : profil, upsert_book, user_books, RLS selon le
 follow, friends_activity et search-books.
@@ -19,9 +21,24 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-URL = "https://<project-ref>.supabase.co"
-KEY = "sb_publishable_xxx"  # clé publique, cf. docs/CONTRAT.md
 ENV_LOCAL = os.environ.get("ENV_LOCAL") or str(Path(__file__).resolve().parents[2] / ".env.local")
+
+
+def env_value(name):
+    """Variable d'environnement, sinon ligne NAME=... de .env.local."""
+    if os.environ.get(name):
+        return os.environ[name]
+    try:
+        for line in open(ENV_LOCAL):
+            if line.startswith(name + "="):
+                return line.rstrip("\n").split("=", 1)[1]
+    except FileNotFoundError:
+        pass
+    sys.exit(f"{name} manquant : le définir dans l'environnement ou dans {ENV_LOCAL}")
+
+
+URL = env_value("SUPABASE_URL").rstrip("/")
+KEY = env_value("SUPABASE_PUBLISHABLE_KEY")  # clé publishable, faite pour le client
 
 failures = []
 
