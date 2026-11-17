@@ -124,6 +124,37 @@ Sources, appelées en parallèle et fusionnées par ISBN-13 :
 
 Ordre de priorité des champs : Google > Hardcover > BnF > Open Library. Toute `cover_url` est en https.
 
+### Limites de débit
+
+L'URL et la clé publishable sont publiques (dépôt open source, app distribuée) : n'importe qui peut créer un compte et appeler `search-books`. La fonction limite donc chaque compte et protège le quota Hardcover. Les compteurs sont dans Postgres : fenêtres fixes d'une minute et d'un jour UTC (remise à zéro à minuit UTC), tables `rate_limit_settings` et `rate_limit_counters`, fonctions `search_books_rate_limit` et `hardcover_take`. Rien de tout cela n'est accessible à `anon` ni à `authenticated`.
+
+**Par utilisateur**, en unités :
+| appel | coût |
+|---|---|
+| tout appel authentifié, y compris servi par le cache ou invalide | 1 |
+| appel qui interroge les sources externes (ISBN absent de `books` et du cache, texte absent du cache) | 10 au total |
+
+| fenêtre | plafond | soit, en recherches qui interrogent les sources | soit, servies par le cache |
+|---|---|---|---|
+| minute | 300 | 30 (un scan toutes les 2 s) | 300 |
+| jour UTC | 6 000 | 600 (une bibliothèque entière scannée d'un coup) | 6 000 |
+
+Au-delà, la fonction n'appelle aucune source et répond :
+
+```
+HTTP 429
+Retry-After: 42
+{ "error": "Trop de recherches en peu de temps. Réessaie dans 42 s.", "retry_after": 42 }
+```
+
+`Retry-After` et `retry_after` donnent le même nombre de secondes avant l'ouverture de la fenêtre pleine : 60 au plus pour la minute, jusqu'à minuit UTC pour le jour (message « Limite de recherches du jour atteinte. Réessaie dans 5 h 12 min. »). `error` est en français et peut être affiché tel quel. L'app ne relance pas automatiquement ; elle peut désactiver la recherche pendant `retry_after` secondes.
+
+**Global, pour Hardcover** : au plus 50 appels sortants par minute et 4 000 par jour UTC, sous le quota du jeton (60/min, 5 000/jour), toute l'app confondue. Au-delà, la recherche continue sans Hardcover, sans erreur : les autres sources répondent, et ce résultat n'est pas mis en cache, pour que la même recherche profite de Hardcover le lendemain.
+
+Les seuils et les coûts sont dans la ligne unique de `rate_limit_settings`, modifiable sans redéploiement. Si la base est injoignable, la fonction laisse passer l'utilisateur mais se passe de Hardcover.
+
+Supabase Auth applique ses propres limites par IP (`[auth.rate_limit]` dans `supabase/config.toml`, poussées avec `supabase config push`) : 10 inscriptions ou connexions par 5 minutes, 30 rafraîchissements de session par 5 minutes. Au-delà, Auth répond HTTP 429 (`over_request_rate_limit`).
+
 ## App iOS
 
 - SwiftUI, iOS 26 minimum, design Liquid Glass natif. La structure simple d'AudioBooth (github.com/AudioBooth/AudioBooth) sert de référence.

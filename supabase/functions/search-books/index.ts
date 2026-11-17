@@ -18,6 +18,13 @@
 //     upsert_book.
 //   - Texte : les résultats sont gardés 30 jours dans search_cache (« q:… »).
 //   - book_id est posé sur chaque résultat déjà présent dans books.
+//
+// Limites de débit (docs/CONTRAT.md), comptées dans Postgres :
+//   - par utilisateur : chaque appel prend une petite part (cost_cached), un
+//     appel qui interroge les sources prend le complément jusqu'à
+//     cost_external ; au-delà, HTTP 429 avec Retry-After ;
+//   - Hardcover : plafond global d'appels sortants ; une fois atteint, la
+//     recherche continue sans Hardcover.
 
 type Source = "google" | "hardcover" | "bnf" | "openlibrary";
 
@@ -51,7 +58,15 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Expose-Headers": "Retry-After",
 };
+
+// Limite par utilisateur dépassée : la recherche s'arrête, réponse 429.
+class RateLimited extends Error {
+  constructor(readonly retryAfter: number) {
+    super(`limite de débit, réessayer dans ${retryAfter} s`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Entrée HTTP
@@ -64,10 +79,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method !== "POST") {
     return json({ error: "Méthode non autorisée, utiliser POST." }, 405);
   }
-  const userToken = await signedInUserToken(req);
-  if (!userToken) {
+  const user = await signedInUser(req);
+  if (!user) {
     return json({ error: "Session utilisateur requise." }, 401);
   }
+  const db = new Db(user, req.headers.get("apikey"));
+
+  // Chaque appel compte, même invalide ou servi par le cache.
+  const wait = await db.rateLimit("request");
+  if (wait > 0) return tooManyRequests(wait);
 
   let body: unknown;
   try {
@@ -81,12 +101,31 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return json({ error: input.error }, 400);
   }
 
-  const db = new Db(userToken, req.headers.get("apikey"));
-  const results = input.kind === "isbn"
-    ? await searchByIsbn(input, db)
-    : await searchByQuery(input, db);
-  return json({ results });
+  try {
+    const results = input.kind === "isbn"
+      ? await searchByIsbn(input, db)
+      : await searchByQuery(input, db);
+    return json({ results });
+  } catch (error) {
+    if (error instanceof RateLimited) return tooManyRequests(error.retryAfter);
+    throw error;
+  }
 });
+
+function tooManyRequests(retryAfter: number): Response {
+  const error = retryAfter <= 60
+    ? `Trop de recherches en peu de temps. Réessaie dans ${retryAfter} s.`
+    : `Limite de recherches du jour atteinte. Réessaie dans ${formatDelay(retryAfter)}.`;
+  console.log(`search-books: limite atteinte, Retry-After ${retryAfter} s`);
+  return json({ error, retry_after: retryAfter }, 429, { "Retry-After": String(retryAfter) });
+}
+
+function formatDelay(seconds: number): string {
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)} min`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.ceil((seconds % 3600) / 60);
+  return m === 0 || m === 60 ? `${h + (m === 60 ? 1 : 0)} h` : `${h} h ${m} min`;
+}
 
 const CACHE_TTL_MS = 30 * 24 * 3600 * 1000;
 
@@ -108,7 +147,7 @@ async function searchByIsbn(
     return row ? [row] : await db.annotate(cached);
   }
 
-  const external = await searchExternal(input);
+  const external = await searchExternal(input, db);
   if (external.complete) await db.writeCache(key, external.results);
   const found = external.results[0];
   if (!found) return row ? [row] : [];
@@ -128,7 +167,7 @@ async function searchByQuery(
   if (results !== null) {
     console.log("search-books: query → search_cache (sans appel externe)");
   } else {
-    const external = await searchExternal(input);
+    const external = await searchExternal(input, db);
     results = external.results;
     // Un résultat dégradé (source en panne) n'est pas mis en cache.
     if (external.complete && results.length > 0) await db.writeCache(key, results);
@@ -145,16 +184,28 @@ function isComplete(b: BookCandidate): boolean {
   return !!b.title && b.authors.length > 0 && !!b.cover_url;
 }
 
-// Interroge toutes les sources. complete = aucune source activée n'a échoué.
+// Interroge toutes les sources, après avoir pris la part « externe » de la
+// limite de l'utilisateur (RateLimited si elle est dépassée).
+// complete = aucune source activée n'a échoué ni été écartée par le plafond
+// Hardcover : un résultat sans Hardcover n'est pas mis en cache.
 async function searchExternal(
   input: SearchInput,
+  db: Db,
 ): Promise<{ results: BookCandidate[]; complete: boolean }> {
+  const wait = await db.rateLimit("external");
+  if (wait > 0) throw new RateLimited(wait);
+
   const googleKey = Deno.env.get("GOOGLE_BOOKS_API_KEY")?.trim();
   const hardcoverToken = Deno.env.get("HARDCOVER_API_TOKEN")?.trim();
+  let hardcoverCapped = false;
   const tasks: Promise<BookCandidate[] | null>[] = [
     googleKey ? withSource("google", (s) => searchGoogle(input, googleKey, s)) : Promise.resolve([]),
     hardcoverToken
-      ? withSource("hardcover", (s) => searchHardcover(input, hardcoverToken, s))
+      ? db.takeHardcover().then((ok) => {
+        if (ok) return withSource("hardcover", (s) => searchHardcover(input, hardcoverToken, s));
+        hardcoverCapped = true;
+        return null;
+      })
       : Promise.resolve([]),
     withSource("bnf", (s) => searchBnf(input, s)),
     withSource("openlibrary", (s) => searchOpenLibrary(input, s)),
@@ -174,7 +225,8 @@ async function searchExternal(
   });
   const n = (r: BookCandidate[] | null) => (r === null ? "échec" : String(r.length));
   console.log(
-    `search-books: ${input.kind} → sources google=${n(google)} hardcover=${n(hardcover)} ` +
+    `search-books: ${input.kind} → sources google=${n(google)} ` +
+      `hardcover=${hardcoverCapped ? "plafond" : n(hardcover)} ` +
       `bnf=${n(bnf)} openlibrary=${n(openlibrary)} → ${results.length}`,
   );
   return { results, complete };
@@ -182,8 +234,9 @@ async function searchExternal(
 
 // ---------------------------------------------------------------------------
 // Base Supabase (PostgREST) : books avec le jeton de l'utilisateur (RLS),
-// search_cache avec la clé service. Une panne de base ne bloque jamais la
-// recherche : on se comporte comme sans cache.
+// search_cache et les limites de débit avec la clé service. Une panne de base
+// ne bloque jamais la recherche : on se comporte comme sans cache et sans
+// limite par utilisateur, mais sans Hardcover (son quota passe avant).
 // ---------------------------------------------------------------------------
 
 const BOOK_COLUMNS = "id,isbn13,isbn10,title,subtitle,authors,publisher,published_date," +
@@ -195,10 +248,12 @@ class Db {
   private readonly url = Deno.env.get("SUPABASE_URL") ?? "";
   private readonly serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   private readonly userToken: string;
+  private readonly userId: string;
   private readonly anonKey: string;
 
-  constructor(userToken: string, apikey: string | null) {
-    this.userToken = userToken;
+  constructor(user: SignedInUser, apikey: string | null) {
+    this.userToken = user.token;
+    this.userId = user.id;
     this.anonKey = apikey ?? Deno.env.get("SUPABASE_ANON_KEY") ?? "";
   }
 
@@ -302,6 +357,33 @@ class Db {
     }, plain);
   }
 
+  // Limite par utilisateur : 0 si l'appel peut continuer, sinon le délai
+  // Retry-After en secondes. Sans clé service (développement local), pas de limite.
+  rateLimit(step: "request" | "external"): Promise<number> {
+    if (!this.serviceKey) return Promise.resolve(0);
+    return this.safe(`limite de débit (${step})`, async () => {
+      const wait = await this.request("/rest/v1/rpc/search_books_rate_limit", {
+        method: "POST",
+        service: true,
+        body: { p_user: this.userId, p_step: step },
+      });
+      return typeof wait === "number" ? wait : 0;
+    }, 0);
+  }
+
+  // Plafond global Hardcover : true si l'appel sortant peut partir (il est
+  // alors compté). En cas de doute (base injoignable), on s'en passe.
+  takeHardcover(): Promise<boolean> {
+    if (!this.serviceKey) return Promise.resolve(true);
+    return this.safe("plafond Hardcover", async () => {
+      return await this.request("/rest/v1/rpc/hardcover_take", {
+        method: "POST",
+        service: true,
+        body: {},
+      }) === true;
+    }, false);
+  }
+
   readCache(key: string): Promise<BookCandidate[] | null> {
     if (!this.serviceKey) return Promise.resolve(null);
     return this.safe("lecture de search_cache", async () => {
@@ -340,9 +422,11 @@ function rowToCandidate(row: BookRow): BookCandidate {
   return { book_id: id, ...book };
 }
 
+type SignedInUser = { token: string; id: string };
+
 // verify_jwt laisse passer la clé publishable (rôle anon) : on exige en plus
 // un jeton de session, validé par Supabase Auth.
-async function signedInUserToken(req: Request): Promise<string | null> {
+async function signedInUser(req: Request): Promise<SignedInUser | null> {
   const token = req.headers.get("Authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1];
   if (!token || token.split(".").length !== 3) return null;
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
@@ -358,17 +442,17 @@ async function signedInUserToken(req: Request): Promise<string | null> {
       return null;
     }
     const user = await res.json() as { id?: string; role?: string };
-    return user.id && user.role === "authenticated" ? token : null;
+    return user.id && user.role === "authenticated" ? { token, id: user.id } : null;
   } catch (error) {
     console.warn("search-books: vérification de session impossible", String(error));
     return null;
   }
 }
 
-function json(payload: unknown, status = 200): Response {
+function json(payload: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(payload), {
     status,
-    headers: { ...CORS_HEADERS, "Content-Type": "application/json; charset=utf-8" },
+    headers: { ...CORS_HEADERS, "Content-Type": "application/json; charset=utf-8", ...headers },
   });
 }
 
