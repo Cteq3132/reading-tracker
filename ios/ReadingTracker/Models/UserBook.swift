@@ -1,39 +1,63 @@
 import Foundation
 
+/// Statut d'un livre de la bibliothèque. Seuls les livres `toRead` sont dans la PAL (voir `docs/CONTRAT.md`).
 enum ReadingStatus: String, Codable, CaseIterable, Identifiable, Sendable {
-  case reading
+  case wishlist
   case toRead = "to_read"
+  case reading
   case read
   case abandoned
+  case released
 
   var id: String { rawValue }
 
-  /// Libellé court, pour le filtre de la bibliothèque.
+  /// Statuts proposés à l'ajout d'un livre, dans l'ordre du contrat.
+  static let addChoices: [ReadingStatus] = [.toRead, .wishlist, .reading, .read]
+
+  /// Libellé court et pluriel, pour les filtres de la bibliothèque.
   var label: String {
     switch self {
-    case .reading: "En cours"
+    case .wishlist: "Envies"
     case .toRead: "PAL"
+    case .reading: "En cours"
     case .read: "Lus"
     case .abandoned: "Abandonnés"
+    case .released: "Libérés"
     }
   }
 
-  /// Libellé d'un livre dans ce statut.
+  /// Libellé d'un livre dans ce statut (libellés du contrat).
   var singularLabel: String {
     switch self {
+    case .wishlist: "Envies"
+    case .toRead: "PAL"
     case .reading: "En cours"
-    case .toRead: "Pile à lire"
     case .read: "Lu"
     case .abandoned: "Abandonné"
+    case .released: "Libéré"
+    }
+  }
+
+  /// Précision affichée sous le libellé quand on choisit le statut d'un livre ajouté.
+  var addHint: String {
+    switch self {
+    case .wishlist: "Je ne l'ai pas encore"
+    case .toRead: "Je l'ai, pas encore lu"
+    case .reading: "Je le lis"
+    case .read: "Je l'ai lu"
+    case .abandoned: "Commencé puis arrêté"
+    case .released: "Donné, vendu ou plus envie"
     }
   }
 
   var systemImage: String {
     switch self {
-    case .reading: "book"
+    case .wishlist: "gift"
     case .toRead: "books.vertical"
+    case .reading: "book"
     case .read: "checkmark.circle"
     case .abandoned: "xmark.circle"
+    case .released: "bird"
     }
   }
 }
@@ -44,6 +68,8 @@ struct UserBook: Codable, Identifiable, Hashable, Sendable {
   var userId: UUID
   var bookId: UUID
   var status: ReadingStatus
+  /// Dernier changement de statut (`timestamptz`, posé par trigger) : sert à l'ancienneté dans la PAL.
+  var statusChangedAt: String?
   var currentPage: Int?
   var startedAt: String?
   var finishedAt: String?
@@ -59,6 +85,7 @@ struct UserBook: Codable, Identifiable, Hashable, Sendable {
     case userId = "user_id"
     case bookId = "book_id"
     case status
+    case statusChangedAt = "status_changed_at"
     case currentPage = "current_page"
     case startedAt = "started_at"
     case finishedAt = "finished_at"
@@ -75,6 +102,7 @@ struct UserBook: Codable, Identifiable, Hashable, Sendable {
     userId = try c.decode(UUID.self, forKey: .userId)
     bookId = try c.decode(UUID.self, forKey: .bookId)
     status = try c.decode(ReadingStatus.self, forKey: .status)
+    statusChangedAt = try c.decodeIfPresent(String.self, forKey: .statusChangedAt)
     currentPage = try c.decodeIfPresent(Int.self, forKey: .currentPage)
     startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt)
     finishedAt = try c.decodeIfPresent(String.self, forKey: .finishedAt)
@@ -87,15 +115,16 @@ struct UserBook: Codable, Identifiable, Hashable, Sendable {
   }
 
   init(
-    id: UUID = UUID(), userId: UUID, book: Book, status: ReadingStatus, currentPage: Int? = nil,
-    startedAt: String? = nil, finishedAt: String? = nil, rating: Int? = nil, review: String? = nil,
-    isFavorite: Bool = false, updatedAt: String? = nil
+    id: UUID = UUID(), userId: UUID, book: Book, status: ReadingStatus, statusChangedAt: String? = nil,
+    currentPage: Int? = nil, startedAt: String? = nil, finishedAt: String? = nil, rating: Int? = nil,
+    review: String? = nil, isFavorite: Bool = false, updatedAt: String? = nil
   ) {
     self.id = id
     self.userId = userId
     self.bookId = book.id
     self.book = book
     self.status = status
+    self.statusChangedAt = statusChangedAt ?? updatedAt
     self.currentPage = currentPage
     self.startedAt = startedAt
     self.finishedAt = finishedAt
@@ -110,6 +139,13 @@ struct UserBook: Codable, Identifiable, Hashable, Sendable {
   var progress: Double? {
     guard let total = book?.pageCount, total > 0, let page = currentPage else { return nil }
     return min(max(Double(page) / Double(total), 0), 1)
+  }
+
+  /// Entrée dans la PAL, pour un livre `toRead` : son dernier changement de statut
+  /// (à défaut, sa création).
+  var palSince: Date? {
+    guard status == .toRead else { return nil }
+    return PostgresDate.parse(statusChangedAt) ?? PostgresDate.parse(createdAt)
   }
 }
 
@@ -174,11 +210,12 @@ struct UserBookUpdate: Encodable, Equatable, Sendable {
       return
     }
     switch status {
-    case .toRead:
+    case .wishlist, .toRead, .released:
       startedAt = saved.startedAt
       finishedAt = saved.finishedAt
     case .reading:
-      let restarts = saved.status == .toRead || saved.status == .read
+      // Seul un livre abandonné reprend sa lecture ; tous les autres la commencent aujourd'hui.
+      let restarts = saved.status != .abandoned
       if startedAt == nil || (restarts && startedAt == saved.startedAt) { startedAt = today }
       finishedAt = saved.finishedAt
     case .read:
@@ -188,8 +225,9 @@ struct UserBookUpdate: Encodable, Equatable, Sendable {
     }
   }
 
-  /// La date de début est affichée pour un livre commencé.
-  var showsStartDate: Bool { status != .toRead }
+  /// La date de début est affichée pour un livre commencé. Un livre libéré est sorti de la PAL
+  /// sans être lu : ses éventuelles dates restent enregistrées, mais ne sont pas affichées.
+  var showsStartDate: Bool { [.reading, .read, .abandoned].contains(status) }
   /// La date de fin n'est affichée que pour un livre lu.
   var showsFinishDate: Bool { status == .read }
   /// Un livre en cours a toujours une date de début, un livre lu une date de fin : le trigger du backend
@@ -216,6 +254,7 @@ extension UserBook {
   /// sert à la mise à jour optimiste et au mode démo.
   func applying(_ update: UserBookUpdate, today: String) -> UserBook {
     var item = self
+    if item.status != update.status { item.statusChangedAt = ISO8601DateFormatter().string(from: .now) }
     item.status = update.status
     item.currentPage = update.currentPage
     item.startedAt = update.startedAt

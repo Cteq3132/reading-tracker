@@ -1,12 +1,14 @@
 import SwiftUI
 
-/// Profil : statistiques, confidentialité du compte, déconnexion.
+/// Profil : statistiques, objectif PAL, confidentialité du compte, déconnexion.
 struct ProfileView: View {
   @Environment(AuthService.self) private var auth
   @Environment(LibraryService.self) private var library
   @Environment(SocialService.self) private var social
 
   @State private var confirmSignOut = false
+  @State private var showsGoal = false
+  @State private var confirmRemoveGoal = false
   @State private var errorMessage: String?
 
   private var name: String { auth.profile?.name ?? auth.email ?? "Mon compte" }
@@ -25,6 +27,8 @@ struct ProfileView: View {
         }
         .listRowBackground(Color.clear)
         .listRowInsets(EdgeInsets())
+
+        goalSection
 
         Section {
           Toggle(isOn: privacyBinding) {
@@ -64,6 +68,66 @@ struct ProfileView: View {
       .navigationTitle("Profil")
       .navigationBarTitleDisplayMode(.inline)
       .errorAlert($errorMessage)
+      .sheet(isPresented: $showsGoal) {
+        PALGoalSheet(currentSize: library.toReadCount, goal: auth.profile?.palGoal)
+      }
+    }
+  }
+
+  // MARK: Objectif PAL
+
+  @ViewBuilder
+  private var goalSection: some View {
+    Section {
+      if let goal = auth.profile?.palGoal {
+        let size = library.toReadCount
+        let progress = goal.progress(currentSize: size)
+        VStack(alignment: .leading, spacing: 8) {
+          HStack(alignment: .firstTextBaseline) {
+            Text("\(goal.target) livre\(goal.target > 1 ? "s" : "") visé\(goal.target > 1 ? "s" : "")")
+              .font(.headline)
+            Spacer()
+            Text("\(Int((progress * 100).rounded())) %")
+              .font(.subheadline.weight(.semibold))
+              .monospacedDigit()
+              .foregroundStyle(.tint)
+          }
+          ReadingProgressBar(progress: progress)
+          let left = goal.remaining(currentSize: size)
+          Text("Ta PAL compte \(size) livre\(size > 1 ? "s" : "") · \(left == 0 ? "objectif atteint" : "encore \(left) à sortir")")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+
+        LabeledContent("Échéance", value: PostgresDate.long(goal.deadline) ?? "Aucune")
+
+        Button("Modifier l'objectif", systemImage: "pencil") { showsGoal = true }
+        Button("Retirer l'objectif", systemImage: "trash", role: .destructive) { confirmRemoveGoal = true }
+          .confirmationDialog("Retirer ton objectif PAL ?", isPresented: $confirmRemoveGoal, titleVisibility: .visible) {
+            Button("Retirer l'objectif", role: .destructive) {
+              Task { await removeGoal() }
+            }
+          }
+      } else {
+        Button("Se fixer un objectif", systemImage: "target") { showsGoal = true }
+          .disabled(auth.profile == nil)
+      }
+    } header: {
+      Text("Objectif PAL")
+    } footer: {
+      if auth.profile?.palGoal == nil {
+        Text("Choisis la taille de PAL que tu vises, avec ou sans échéance.")
+      }
+    }
+  }
+
+  private func removeGoal() async {
+    do {
+      try await auth.setPALGoal(target: nil, deadline: nil, currentSize: library.toReadCount)
+    } catch {
+      errorMessage = ErrorMessage.from(error)
     }
   }
 

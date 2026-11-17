@@ -169,7 +169,7 @@ struct ActivityRow: View {
       if let rating = activity.rating {
         StarsView(rating: rating)
       }
-    case .toRead, .abandoned:
+    case .wishlist, .toRead, .abandoned, .released:
       EmptyView()
     }
   }

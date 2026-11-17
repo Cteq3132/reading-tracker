@@ -24,6 +24,7 @@ struct AddBookView: View {
           CandidateRow(
             candidate: candidate,
             existingStatus: library.existing(for: candidate)?.status,
+            palSize: library.toReadCount,
             isAdding: adding == candidate.id
           ) { status in
             Task { await add(candidate, status: status) }
@@ -133,9 +134,19 @@ struct AddBookView: View {
     defer { adding = nil }
     do {
       try await library.add(candidate, status: status, userId: userId)
-      showConfirmation("Ajouté : \(status.singularLabel)")
+      showConfirmation(Self.addedMessage(status))
     } catch {
       errorMessage = ErrorMessage.from(error)
+    }
+  }
+}
+
+extension AddBookView {
+  static func addedMessage(_ status: ReadingStatus) -> String {
+    switch status {
+    case .toRead: "Ajouté à ta PAL"
+    case .wishlist: "Ajouté à tes envies"
+    default: "Ajouté : \(status.singularLabel)"
     }
   }
 }
@@ -143,6 +154,8 @@ struct AddBookView: View {
 private struct CandidateRow: View {
   let candidate: BookCandidate
   let existingStatus: ReadingStatus?
+  /// Taille actuelle de la PAL, rappelée discrètement sous le choix « PAL ».
+  let palSize: Int
   let isAdding: Bool
   let onAdd: (ReadingStatus) -> Void
 
@@ -179,13 +192,17 @@ private struct CandidateRow: View {
       .frame(maxWidth: .infinity, alignment: .leading)
 
       Menu {
-        ForEach(ReadingStatus.allCases) { status in
-          Button {
-            onAdd(status)
-          } label: {
-            Label(status.singularLabel, systemImage: status.systemImage)
+        Section(existingStatus == nil ? "Ajouter à" : "Déplacer vers") {
+          ForEach(ReadingStatus.addChoices) { status in
+            Button {
+              onAdd(status)
+            } label: {
+              Image(systemName: status.systemImage)
+              Text(status.singularLabel)
+              Text(hint(for: status))
+            }
+            .disabled(status == existingStatus)
           }
-          .disabled(status == existingStatus)
         }
       } label: {
         Group {
@@ -204,6 +221,12 @@ private struct CandidateRow: View {
       .accessibilityLabel(existingStatus == nil ? "Ajouter" : "Changer le statut")
     }
     .padding(.vertical, 4)
+  }
+
+  /// Sous-titre du choix : précision du statut, et pour la PAL, sa taille actuelle.
+  private func hint(for status: ReadingStatus) -> String {
+    guard status == .toRead, existingStatus != .toRead else { return status.addHint }
+    return "Je l'ai · ta PAL compte \(palSize) livre\(palSize > 1 ? "s" : "")"
   }
 
   private var details: String {

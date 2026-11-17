@@ -11,6 +11,10 @@ final class LibraryService {
   private(set) var isLoading = false
   var errorMessage: String?
 
+  /// Prévenu de chaque changement de statut accepté (ajout, modification, suppression), pour tenir
+  /// à jour le bilan de la PAL : `(ligne, ancien statut, nouveau statut)`, `nil` = absente.
+  @ObservationIgnored var onStatusChange: (@MainActor (UserBook, ReadingStatus?, ReadingStatus?) -> Void)?
+
   private static let selectWithBook = "*, book:books(*)"
 
   func items(with status: ReadingStatus) -> [UserBook] {
@@ -71,6 +75,7 @@ final class LibraryService {
         updatedAt: ISO8601DateFormatter().string(from: .now)
       )
       items.insert(item, at: 0)
+      onStatusChange?(item, nil, status)
       return item
     }
 
@@ -91,6 +96,7 @@ final class LibraryService {
       .execute()
       .value
     items.insert(item, at: 0)
+    onStatusChange?(item, nil, item.status)
     return item
   }
 
@@ -107,7 +113,9 @@ final class LibraryService {
     let optimistic = items[index].applying(update, today: PostgresDate.today())
 
     if AppConfig.isDemo {
+      let previous = items[index].status
       items[index] = optimistic
+      if previous != optimistic.status { onStatusChange?(optimistic, previous, optimistic.status) }
       return optimistic
     }
 
@@ -130,7 +138,9 @@ final class LibraryService {
         .single()
         .execute()
         .value
+      let previous = confirmed[id]?.status
       confirmed[id] = saved
+      if let previous, previous != saved.status { onStatusChange?(saved, previous, saved.status) }
       replace(id: id, with: saved, ifStillEqualTo: optimistic)
       return saved
     } catch {
@@ -149,6 +159,7 @@ final class LibraryService {
     if !AppConfig.isDemo {
       try await supabase.from("user_books").delete().eq("id", value: id).execute()
     }
+    if let removed = item(id: id) { onStatusChange?(removed, removed.status, nil) }
     items.removeAll { $0.id == id }
   }
 
@@ -178,6 +189,7 @@ final class LibraryService {
     items(with: .reading).sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
   }
 
+  /// Taille de la PAL : les livres possédés pas encore lus.
   var toReadCount: Int { items(with: .toRead).count }
   var readingCount: Int { items(with: .reading).count }
 }

@@ -1,22 +1,25 @@
 import SwiftUI
 
-/// Accueil : lectures en cours, stats du mois et dernières activités des amis.
+/// Accueil : carte PAL (taille, bilan du mois, objectif, pioche), lectures en cours et dernières
+/// activités des amis, dont leurs progrès de PAL.
 struct HomeView: View {
   @Binding var selectedTab: AppTab
   @Environment(AuthService.self) private var auth
   @Environment(LibraryService.self) private var library
   @Environment(SocialService.self) private var social
+  @Environment(PALService.self) private var pal
 
   @State private var pageUpdate: UserBook?
-  @State private var showsStartReading = false
+  @State private var showsDraw = false
+  @State private var showsGoal = false
 
   var body: some View {
     NavigationStack {
       ScrollView {
         VStack(alignment: .leading, spacing: 32) {
           header
+          palSection
           readingSection
-          statsSection
           friendsSection
         }
         .padding(.top, 8)
@@ -37,15 +40,16 @@ struct HomeView: View {
       }
       .refreshable {
         guard let userId = auth.userId else { return }
-        async let a: Void = library.load(userId: userId)
-        async let b: Void = social.refresh(userId: userId)
-        _ = await (a, b)
+        await MainTabView.refreshAll(userId: userId, library: library, social: social, pal: pal)
       }
       .sheet(item: $pageUpdate) { item in
         PageUpdateSheet(item: item)
       }
-      .sheet(isPresented: $showsStartReading) {
-        StartReadingSheet()
+      .sheet(isPresented: $showsDraw) {
+        DrawSheet()
+      }
+      .sheet(isPresented: $showsGoal) {
+        PALGoalSheet(currentSize: library.toReadCount, goal: auth.profile?.palGoal)
       }
     }
   }
@@ -70,6 +74,24 @@ struct HomeView: View {
     let hello = (5..<18).contains(hour) ? "Bonjour" : "Bonsoir"
     guard let profile = auth.profile else { return hello }
     return "\(hello) \(profile.name)"
+  }
+
+  // MARK: PAL
+
+  @ViewBuilder
+  private var palSection: some View {
+    if library.hasLoaded {
+      PALCard(
+        size: library.toReadCount,
+        balance: pal.monthBalance(),
+        goal: auth.profile?.palGoal,
+        onDraw: { showsDraw = true },
+        onSetGoal: { showsGoal = true },
+        onAdd: { selectedTab = .add }
+      )
+      .padding(.horizontal, 20)
+      .animation(.snappy, value: library.toReadCount)
+    }
   }
 
   // MARK: Lectures en cours
@@ -126,7 +148,7 @@ struct HomeView: View {
       GlassEffectContainer(spacing: 8) {
         HStack(spacing: 10) {
           if library.toReadCount > 0 {
-            Button("Choisir dans ma PAL") { showsStartReading = true }
+            Button("Piocher dans ma PAL") { showsDraw = true }
               .buttonStyle(.glassProminent)
           }
           Button("Ajouter un livre") { selectedTab = .add }
@@ -138,20 +160,6 @@ struct HomeView: View {
     .padding(.vertical, 24)
     .padding(.horizontal, 16)
     .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 24))
-  }
-
-  // MARK: Stats
-
-  private var statsSection: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      SectionHeader(title: "Ce mois-ci")
-      HStack(spacing: 12) {
-        StatTile(value: library.readThisMonth, label: "Terminés", systemImage: "checkmark.circle")
-        StatTile(value: library.toReadCount, label: "Dans la PAL", systemImage: "books.vertical")
-        StatTile(value: library.readThisYear, label: "Lus en \(String(Calendar.current.component(.year, from: .now)))", systemImage: "calendar")
-      }
-      .padding(.horizontal, 20)
-    }
   }
 
   // MARK: Amis
@@ -167,8 +175,9 @@ struct HomeView: View {
       }
 
       let recent = Array(social.activity.prefix(3))
+      let palMoves = friendPALMoves
       Group {
-        if recent.isEmpty {
+        if recent.isEmpty && palMoves.isEmpty {
           HStack(spacing: 12) {
             Image(systemName: "person.2")
               .foregroundStyle(.tint)
@@ -180,8 +189,16 @@ struct HomeView: View {
           .padding(16)
         } else {
           VStack(spacing: 0) {
-            ForEach(Array(recent.enumerated()), id: \.element.id) { index, activity in
+            ForEach(Array(palMoves.enumerated()), id: \.element.profile.id) { index, move in
               if index > 0 {
+                Divider().padding(.leading, 64)
+              }
+              FriendPALRow(profile: move.profile, balance: move.balance)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            }
+            ForEach(Array(recent.enumerated()), id: \.element.id) { index, activity in
+              if index > 0 || !palMoves.isEmpty {
                 Divider().padding(.leading, 64)
               }
               ActivityRow(activity: activity)
@@ -195,6 +212,53 @@ struct HomeView: View {
       .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 24))
       .padding(.horizontal, 20)
     }
+  }
+}
+
+/// Progrès de PAL d'un ami suivi sur le mois.
+private struct FriendPALMove {
+  let profile: Profile
+  let balance: PALBalance
+}
+
+extension HomeView {
+  /// Amis suivis dont la PAL a baissé ce mois-ci, la plus forte baisse d'abord (deux au plus).
+  fileprivate var friendPALMoves: [FriendPALMove] {
+    let profiles = Dictionary(social.followingProfiles.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    var moves: [FriendPALMove] = []
+    for (id, balance) in pal.friendBalances() where balance.net < 0 {
+      if let profile = profiles[id] { moves.append(FriendPALMove(profile: profile, balance: balance)) }
+    }
+    moves.sort { a, b in
+      a.balance.net == b.balance.net ? a.profile.name < b.profile.name : a.balance.net < b.balance.net
+    }
+    return Array(moves.prefix(2))
+  }
+}
+
+/// Progrès de PAL d'un ami ce mois-ci : « Léa a fait baisser sa PAL · 5 sorties ce mois   −4 ».
+private struct FriendPALRow: View {
+  let profile: Profile
+  let balance: PALBalance
+
+  var body: some View {
+    HStack(spacing: 12) {
+      AvatarView(name: profile.name, url: profile.avatarUrl, size: 36)
+      VStack(alignment: .leading, spacing: 2) {
+        Text("\(Text(profile.name).fontWeight(.semibold)) a fait baisser sa PAL")
+          .font(.subheadline)
+        Text("\(balance.exits) sortie\(balance.exits > 1 ? "s" : "") ce mois")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+      Text(PALBalance.signed(balance.net))
+        .font(.title3.bold())
+        .monospacedDigit()
+        .foregroundStyle(.green)
+    }
+    .padding(.vertical, 4)
+    .accessibilityElement(children: .combine)
   }
 }
 
