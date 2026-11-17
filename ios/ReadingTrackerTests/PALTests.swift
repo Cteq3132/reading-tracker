@@ -145,25 +145,25 @@ struct PALTests {
     #expect(PALGoal(target: 8, startSize: 8).progress(currentSize: 8) == 1)
   }
 
-  @Test("L'objectif se lit depuis le profil ; sans cible, pas d'objectif")
-  func profileGoal() throws {
+  @Test("L'objectif se lit depuis une ligne de pal_goals")
+  func decodeGoal() throws {
     let json = """
-    {"id": "00000000-0000-0000-0000-000000000001", "username": "louis", "is_private": false,
-     "pal_goal_target": 8, "pal_goal_deadline": "2026-12-31", "pal_goal_start_size": 14,
-     "pal_goal_set_at": "2026-10-01T08:00:00+00:00"}
+    {"user_id": "00000000-0000-0000-0000-000000000001", "target": 8, "deadline": "2026-12-31",
+     "start_size": 14, "set_at": "2026-10-01T08:00:00.123456+00:00"}
     """
-    let profile = try JSONDecoder().decode(Profile.self, from: Data(json.utf8))
-    #expect(profile.palGoal == PALGoal(target: 8, deadline: "2026-12-31", startSize: 14))
-    let none = try JSONDecoder().decode(Profile.self, from: Data(#"{"id": "00000000-0000-0000-0000-000000000001", "username": "louis"}"#.utf8))
-    #expect(none.palGoal == nil)
+    let goal = try JSONDecoder().decode(PALGoal.self, from: Data(json.utf8))
+    #expect(goal == PALGoal(target: 8, deadline: "2026-12-31", startSize: 14, setAt: "2026-10-01T08:00:00.123456+00:00"))
+    let open = try JSONDecoder().decode(PALGoal.self, from: Data(#"{"target": 5, "deadline": null, "start_size": null}"#.utf8))
+    #expect(open.deadline == nil && open.startSize == nil)
   }
 
-  @Test("Retirer l'objectif envoie des null explicites")
-  func goalUpdateEncodesNulls() throws {
-    let data = try JSONEncoder().encode(PALGoalUpdate(target: nil, deadline: nil))
+  @Test("L'upsert de l'objectif n'envoie que la cible et l'échéance, null compris")
+  func goalUpsertEncoding() throws {
+    let data = try JSONEncoder().encode(PALGoalUpsert(target: 8, deadline: nil))
     let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-    #expect(json.keys.sorted() == ["pal_goal_deadline", "pal_goal_target"])
-    #expect(json["pal_goal_target"] is NSNull && json["pal_goal_deadline"] is NSNull)
+    #expect(json.keys.sorted() == ["deadline", "target"])
+    #expect(json["target"] as? Int == 8)
+    #expect(json["deadline"] is NSNull)
   }
 
   // MARK: Ancienneté

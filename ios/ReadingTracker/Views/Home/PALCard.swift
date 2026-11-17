@@ -44,7 +44,11 @@ struct PALCard: View {
       .accessibilityElement(children: .combine)
 
       if let goal {
-        goalProgress(goal)
+        PALGoalProgress(
+          title: PALGoalText.title(goal),
+          caption: PALGoalText.remaining(goal, currentSize: size),
+          progress: goal.progress(currentSize: size)
+        )
       } else {
         Button(action: onSetGoal) {
           Label("Se fixer un objectif", systemImage: "target")
@@ -83,28 +87,6 @@ struct PALCard: View {
     }
   }
 
-  private func goalProgress(_ goal: PALGoal) -> some View {
-    let progress = goal.progress(currentSize: size)
-    return VStack(alignment: .leading, spacing: 8) {
-      HStack(alignment: .firstTextBaseline) {
-        Text(PALGoalText.title(goal))
-          .font(.subheadline.weight(.medium))
-          .lineLimit(1)
-          .minimumScaleFactor(0.85)
-        Spacer(minLength: 8)
-        Text("\(Int((progress * 100).rounded())) %")
-          .font(.subheadline.weight(.semibold))
-          .monospacedDigit()
-          .foregroundStyle(.tint)
-      }
-      ReadingProgressBar(progress: progress)
-      Text(PALGoalText.remaining(goal, currentSize: size))
-        .font(.caption)
-        .foregroundStyle(.secondary)
-    }
-    .accessibilityElement(children: .combine)
-  }
-
   // MARK: PAL vide
 
   private var empty: some View {
@@ -129,6 +111,35 @@ struct PALCard: View {
     }
     .frame(maxWidth: .infinity)
     .padding(.vertical, 4)
+  }
+}
+
+/// Progression de l'objectif PAL : titre, pourcentage, barre et légende. Partagée par l'Accueil et le Profil.
+struct PALGoalProgress: View {
+  let title: String
+  let caption: String
+  let progress: Double
+  var titleFont: Font = .subheadline.weight(.medium)
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(alignment: .firstTextBaseline) {
+        Text(title)
+          .font(titleFont)
+          .lineLimit(1)
+          .minimumScaleFactor(0.85)
+        Spacer(minLength: 8)
+        Text("\(Int((progress * 100).rounded())) %")
+          .font(.subheadline.weight(.semibold))
+          .monospacedDigit()
+          .foregroundStyle(.tint)
+      }
+      ReadingProgressBar(progress: progress)
+      Text(caption)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+    .accessibilityElement(children: .combine)
   }
 }
 

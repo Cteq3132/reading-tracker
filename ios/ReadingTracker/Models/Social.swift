@@ -7,12 +7,6 @@ struct Profile: Codable, Identifiable, Hashable, Sendable {
   var avatarUrl: String?
   var isPrivate: Bool
   var createdAt: String?
-  /// Objectif PAL : taille visée et échéance (`yyyy-MM-dd`), écrites par l'app.
-  var palGoalTarget: Int?
-  var palGoalDeadline: String?
-  /// Taille de la PAL et instant où l'objectif a été fixé : posés par trigger, jamais envoyés.
-  var palGoalStartSize: Int?
-  var palGoalSetAt: String?
 
   enum CodingKeys: String, CodingKey {
     case id, username
@@ -20,10 +14,6 @@ struct Profile: Codable, Identifiable, Hashable, Sendable {
     case avatarUrl = "avatar_url"
     case isPrivate = "is_private"
     case createdAt = "created_at"
-    case palGoalTarget = "pal_goal_target"
-    case palGoalDeadline = "pal_goal_deadline"
-    case palGoalStartSize = "pal_goal_start_size"
-    case palGoalSetAt = "pal_goal_set_at"
   }
 
   init(id: UUID = UUID(), username: String, displayName: String? = nil, avatarUrl: String? = nil, isPrivate: Bool = false) {
@@ -34,12 +24,6 @@ struct Profile: Codable, Identifiable, Hashable, Sendable {
     self.isPrivate = isPrivate
   }
 
-  /// Objectif PAL en cours, s'il y en a un.
-  var palGoal: PALGoal? {
-    guard let palGoalTarget else { return nil }
-    return PALGoal(target: palGoalTarget, deadline: palGoalDeadline, startSize: palGoalStartSize)
-  }
-
   init(from decoder: Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
     id = try c.decode(UUID.self, forKey: .id)
@@ -48,10 +32,6 @@ struct Profile: Codable, Identifiable, Hashable, Sendable {
     avatarUrl = try c.decodeIfPresent(String.self, forKey: .avatarUrl)
     isPrivate = try c.decodeIfPresent(Bool.self, forKey: .isPrivate) ?? false
     createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt)
-    palGoalTarget = try c.decodeIfPresent(Int.self, forKey: .palGoalTarget)
-    palGoalDeadline = try c.decodeIfPresent(String.self, forKey: .palGoalDeadline)
-    palGoalStartSize = try c.decodeIfPresent(Int.self, forKey: .palGoalStartSize)
-    palGoalSetAt = try c.decodeIfPresent(String.self, forKey: .palGoalSetAt)
   }
 
   var name: String {

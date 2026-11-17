@@ -98,16 +98,22 @@ enum DemoData {
   /// Jour `day` du mois en cours, à 10 h, jamais dans le futur : le bilan du mois reste le même
   /// quel que soit le jour où l'on lance la démo.
   private static func thisMonth(_ day: Int) -> Date {
-    let start = PALLedger.monthStart(of: .now)
-    let date = start.addingTimeInterval(Double(day - 1) * 86_400 + 10 * 3600)
-    return min(date, Date.now.addingTimeInterval(-60))
+    min(monthDay(day, monthsAgo: 0), Date.now.addingTimeInterval(-60))
   }
 
   /// Jour `day` du mois précédent, à 10 h.
   private static func lastMonth(_ day: Int) -> Date {
+    monthDay(day, monthsAgo: 1)
+  }
+
+  /// Jour `day` à 10 h, heure locale, du mois situé `monthsAgo` mois avant le mois en cours.
+  private static func monthDay(_ day: Int, monthsAgo: Int) -> Date {
     let calendar = PostgresDate.localCalendar
-    let start = calendar.date(byAdding: .month, value: -1, to: PALLedger.monthStart(of: .now)) ?? .now
-    return start.addingTimeInterval(Double(day - 1) * 86_400 + 10 * 3600)
+    var components = calendar.dateComponents([.year, .month], from: .now)
+    components.month = (components.month ?? 1) - monthsAgo
+    components.day = day
+    components.hour = 10
+    return calendar.date(from: components) ?? .now
   }
 
   private static func ago(days: Int = 0, months: Int = 0, years: Int = 0) -> Date {
@@ -118,19 +124,13 @@ enum DemoData {
 
   private static func iso(_ date: Date) -> String { ISO8601DateFormatter().string(from: date) }
 
-  // MARK: Profil et objectif
+  // MARK: Objectif
 
-  /// Mon profil, avec un objectif PAL (14 livres quand il a été fixé, 8 visés d'ici la fin de l'année),
-  /// sauf avec `-demo-goal none`.
-  static var meWithGoal: Profile {
-    var profile = me
-    guard AppConfig.demoGoal != "none" else { return profile }
+  /// Objectif PAL (14 livres quand il a été fixé, 8 visés d'ici la fin de l'année), sauf avec `-demo-goal none`.
+  static var goal: PALGoal? {
+    guard AppConfig.demoGoal != "none" else { return nil }
     let year = PostgresDate.localCalendar.component(.year, from: .now)
-    profile.palGoalTarget = 8
-    profile.palGoalDeadline = "\(year)-12-31"
-    profile.palGoalStartSize = 14
-    profile.palGoalSetAt = iso(lastMonth(1))
-    return profile
+    return PALGoal(target: 8, deadline: "\(year)-12-31", startSize: 14, setAt: iso(lastMonth(1)))
   }
 
   // MARK: Bibliothèque

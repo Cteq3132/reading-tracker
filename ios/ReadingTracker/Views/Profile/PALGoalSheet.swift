@@ -5,7 +5,7 @@ struct PALGoalSheet: View {
   let currentSize: Int
   let goal: PALGoal?
 
-  @Environment(AuthService.self) private var auth
+  @Environment(PALService.self) private var pal
   @Environment(\.dismiss) private var dismiss
   @State private var target: Int
   @State private var hasDeadline: Bool
@@ -88,7 +88,7 @@ struct PALGoalSheet: View {
     isSaving = true
     defer { isSaving = false }
     do {
-      try await auth.setPALGoal(
+      try await pal.setGoal(
         target: target,
         deadline: hasDeadline ? PostgresDate.day(from: deadline) : nil,
         currentSize: currentSize

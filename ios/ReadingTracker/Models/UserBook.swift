@@ -145,8 +145,11 @@ struct UserBook: Codable, Identifiable, Hashable, Sendable {
   /// (à défaut, sa création).
   var palSince: Date? {
     guard status == .toRead else { return nil }
-    return PostgresDate.parse(statusChangedAt) ?? PostgresDate.parse(createdAt)
+    return statusChangedDate ?? PostgresDate.parse(createdAt)
   }
+
+  /// Dernier changement de statut, en date.
+  var statusChangedDate: Date? { PostgresDate.parse(statusChangedAt) }
 }
 
 /// Champs modifiables depuis la fiche livre. Les `nil` sont envoyés en `null` pour pouvoir effacer une valeur.

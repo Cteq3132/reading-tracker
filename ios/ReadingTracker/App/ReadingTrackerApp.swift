@@ -108,7 +108,6 @@ extension MainTabView {
     async let a: Void = library.load(userId: userId)
     async let b: Void = social.refresh(userId: userId)
     _ = await (a, b)
-    let friendIds = social.outgoing.filter { $0.value == .accepted }.map(\.key)
-    await pal.load(userId: userId, friendIds: friendIds)
+    await pal.load(userId: userId, friendIds: social.acceptedFollowingIds)
   }
 }
