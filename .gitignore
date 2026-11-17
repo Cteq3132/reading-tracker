@@ -1,0 +1,7 @@
+.env.local
+.DS_Store
+xcuserdata/
+DerivedData/
+build/
+supabase/.temp/
+supabase/.branches/
