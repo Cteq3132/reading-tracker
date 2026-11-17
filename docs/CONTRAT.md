@@ -1,4 +1,6 @@
-# reading-tracker — contrat entre backend et app
+# Unshelf — contrat entre backend et app
+
+**Unshelf** aide ses utilisateurs à faire baisser leur PAL (pile à lire) : la PAL ne contient que les livres possédés et pas encore lus, et l'app met en avant ce qui en sort. Le dépôt garde le nom technique `reading-tracker`.
 
 Ce document est la source de vérité partagée par le backend Supabase (`supabase/`) et l'app iOS (`ios/`).
 Toute évolution du schéma ou de l'API se fait ici d'abord.
@@ -27,9 +29,14 @@ Toute évolution du schéma ou de l'API se fait ici d'abord.
 | display_name | text | |
 | avatar_url | text | |
 | is_private | bool default false | privé ⇒ les follows passent par une demande |
+| pal_goal_target | int | taille de PAL visée, nullable (pas d'objectif) ; ≥ 0 |
+| pal_goal_deadline | date | échéance de l'objectif, nullable |
+| pal_goal_start_size | int | taille de la PAL quand l'objectif a été fixé, posée par trigger (à ne pas envoyer) |
+| pal_goal_set_at | timestamptz | posé par trigger quand `pal_goal_target` change |
 | created_at | timestamptz | |
 
 RLS : lecture pour tout utilisateur connecté ; mise à jour de sa propre ligne seulement.
+Objectif PAL : l'app écrit `pal_goal_target` et `pal_goal_deadline` (ou les remet à `null`). Quand `pal_goal_target` change, un trigger pose `pal_goal_start_size` (nombre de `user_books` du compte en `to_read` à cet instant) et `pal_goal_set_at = now()`. Progression = `(start_size − taille actuelle) / (start_size − target)`, bornée à [0, 1].
 
 ### `books` — cache partagé des fiches
 | colonne | type | note |
@@ -58,7 +65,8 @@ RLS : lecture pour les utilisateurs connectés, **pas d'écriture directe**. On 
 | id | uuid PK | |
 | user_id | uuid not null default `auth.uid()` | FK profiles, cascade |
 | book_id | uuid not null | FK books |
-| status | text not null | `to_read` (PAL) \| `reading` \| `read` \| `abandoned` |
+| status | text not null | `wishlist` \| `to_read` \| `reading` \| `read` \| `abandoned` \| `released` (voir ci-dessous) |
+| status_changed_at | timestamptz not null | posé par trigger à l'insertion et à chaque changement de `status` ; sert à l'ancienneté dans la PAL |
 | current_page | int | |
 | started_at | date | posé auto au passage en `reading` s'il est vide |
 | finished_at | date | posé auto au passage en `read` s'il est vide |
@@ -68,8 +76,36 @@ RLS : lecture pour les utilisateurs connectés, **pas d'écriture directe**. On 
 | created_at, updated_at | timestamptz | `updated_at` maintenu par trigger |
 
 Contrainte : unique `(user_id, book_id)`.
+
+Statuts :
+| statut | libellé app | sens | dans la PAL |
+|---|---|---|---|
+| `wishlist` | Envies | je veux le lire, je ne l'ai pas | non |
+| `to_read` | PAL | je l'ai, je ne l'ai pas encore lu | **oui** |
+| `reading` | En cours | | non |
+| `read` | Lu | | non |
+| `abandoned` | Abandonné | commencé puis arrêté | non |
+| `released` | Libéré | sorti de la PAL sans être lu (donné, vendu, plus envie) | non |
+
+**PAL** = les `user_books` du compte au statut `to_read`. **Entrée en PAL** : un passage vers `to_read` (insertion comprise). **Sortie de PAL** : un passage de `to_read` vers un autre statut, ou la suppression d'une ligne `to_read`. Ancienneté dans la PAL = `now() − status_changed_at` d'une ligne `to_read`.
 Dates de lecture : jours calendaires `yyyy-MM-dd`, que le client calcule dans le fuseau local de l'utilisateur (jamais en UTC) et peut modifier à la main ; le trigger ne remplace jamais une date fournie. Un `null` envoyé pour `started_at` d'un livre `reading`, ou pour `finished_at` d'un livre `read`, est remplacé par le trigger par `current_date` (UTC) : l'app ne propose donc d'effacer que les autres dates.
 RLS : le propriétaire fait tout. En lecture seule, la ligne est aussi visible si le profil du propriétaire est public, ou si l'utilisateur courant le suit avec un follow `accepted`.
+
+### `user_book_events` — historique des statuts
+| colonne | type | note |
+|---|---|---|
+| id | bigint identity PK | |
+| user_id | uuid not null | FK profiles, cascade |
+| user_book_id | uuid | FK user_books, `on delete set null` |
+| book_id | uuid not null | FK books |
+| from_status | text | `null` à l'insertion |
+| to_status | text | `null` à la suppression |
+| occurred_at | timestamptz not null default now() | |
+
+Écrite **uniquement par trigger** sur `user_books` (insertion, changement de `status`, suppression) ; aucune écriture directe pour `authenticated`. Index sur `(user_id, occurred_at)`.
+RLS en lecture : mêmes règles que `user_books` (le propriétaire, un profil public, ou un follow `accepted`).
+Reprise de l'existant : la migration crée, pour chaque `user_books` déjà présent, un événement `null → status` daté de son `created_at`, et pose `status_changed_at = created_at`.
+Les bilans (entrées, sorties, solde du mois) se calculent côté client à partir des événements, en regroupant `occurred_at` par mois dans le fuseau local de l'utilisateur.
 
 ### `follows`
 | colonne | type | note |
@@ -84,7 +120,7 @@ RLS : lecture si je suis l'un des deux ; insertion si `follower_id = auth.uid()`
 
 ### Vue `friends_activity` (`security_invoker = true`)
 Les `user_books` des comptes que je suis (follow `accepted`), joints à `books` et `profiles`, triés par `updated_at desc`.
-Colonnes : `user_book_id, user_id, username, display_name, avatar_url, book_id, title, authors, cover_url, status, current_page, page_count, rating, updated_at`.
+Colonnes : `user_book_id, user_id, username, display_name, avatar_url, book_id, title, authors, cover_url, status, current_page, page_count, rating, updated_at`. Inchangée par Unshelf ; `status` peut maintenant valoir `wishlist` ou `released`.
 
 ### RPC
 - `upsert_book(book jsonb) returns uuid` (security definer) : prend un candidat au format renvoyé par `search-books`. Elle déduplique sur `isbn13`, sinon sur `(source, source_id)`, complète les champs vides d'une fiche existante sans écraser ceux qui sont remplis, et renvoie l'id.
@@ -168,6 +204,8 @@ Supabase Auth applique ses propres limites par IP (`[auth.rate_limit]` dans `sup
 ## App iOS
 
 - SwiftUI, iOS 26 minimum, design Liquid Glass natif. La structure simple d'AudioBooth (github.com/AudioBooth/AudioBooth) sert de référence.
-- Bundle id `fr.dachet.readingtracker`, nom affiché « reading-tracker » (provisoire).
+- Bundle id `fr.dachet.readingtracker` (inchangé), nom affiché **« Unshelf »**.
 - Dépendance : `supabase-swift` (SPM).
-- Onglets : **Accueil** (date et salut, lectures en cours avec mise à jour rapide de la page, stats du mois calculées côté client, 3 dernières activités des amis), **Bibliothèque** (En cours / PAL / Lus / Abandonnés), **Amis** (activité, recherche de comptes, demandes), **Profil**. **Ajouter** (recherche et scan ISBN) est l'onglet de recherche iOS 26 (`Tab(role: .search)`), affiché à part dans la tab bar ; l'Accueil y mène aussi.
+- Onglets : **Accueil** (date et salut ; carte PAL en tête : taille actuelle, entrées, sorties et solde du mois, progression de l'objectif ; « Piocher dans ma PAL » : au hasard, le plus ancien ou le plus court, puis « Commencer » ; lectures en cours avec mise à jour rapide de la page ; 3 dernières activités des amis, dont leurs progrès de PAL), **Bibliothèque** (En cours / PAL / Envies / Lus / Abandonnés et libérés ; dans la PAL : ancienneté de chaque livre, tri par ancienneté ou par nombre de pages, action « Libérer »), **Amis** (activité, recherche de comptes, demandes), **Profil**. **Ajouter** (recherche et scan ISBN) est l'onglet de recherche iOS 26 (`Tab(role: .search)`), affiché à part dans la tab bar ; l'Accueil y mène aussi.
+- À l'ajout d'un livre, l'app demande son statut : PAL (je l'ai), Envies, En cours ou Lu ; en choisissant PAL, elle rappelle discrètement la taille actuelle de la PAL.
+- Objectif PAL : réglable dans le Profil (taille visée, échéance facultative).
