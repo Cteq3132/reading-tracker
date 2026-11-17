@@ -34,6 +34,9 @@ struct Book: Codable, Identifiable, Hashable, Sendable {
 
 /// Candidat renvoyé par l'Edge Function `search-books`, et accepté tel quel par la RPC `upsert_book`.
 struct BookCandidate: Codable, Hashable, Identifiable, Sendable {
+  /// Id de la fiche si elle est déjà dans `books` (renvoyé par `search-books`) : on peut alors
+  /// créer le `user_books` sans passer par `upsert_book`. Lu seulement, jamais renvoyé au serveur.
+  var bookId: UUID?
   var isbn13: String?
   var isbn10: String?
   var title: String
@@ -79,7 +82,13 @@ struct BookCandidate: Codable, Hashable, Identifiable, Sendable {
     self.sourceId = sourceId
   }
 
+  private enum ExtraKeys: String, CodingKey {
+    case bookId = "book_id"
+  }
+
   init(from decoder: Decoder) throws {
+    let extra = try decoder.container(keyedBy: ExtraKeys.self)
+    bookId = try? extra.decodeIfPresent(UUID.self, forKey: .bookId)
     let c = try decoder.container(keyedBy: CodingKeys.self)
     isbn13 = try c.decodeIfPresent(String.self, forKey: .isbn13)
     isbn10 = try c.decodeIfPresent(String.self, forKey: .isbn10)

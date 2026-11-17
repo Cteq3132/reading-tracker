@@ -24,6 +24,7 @@ final class LibraryService {
   /// Ligne existante pour ce candidat (même ISBN-13, ou même source).
   func existing(for candidate: BookCandidate) -> UserBook? {
     items.first { item in
+      if let bookId = candidate.bookId, item.bookId == bookId { return true }
       guard let book = item.book else { return false }
       if let isbn = candidate.isbn13, let other = book.isbn13 { return isbn == other }
       return book.source == candidate.source && book.sourceId != nil && book.sourceId == candidate.sourceId
@@ -69,10 +70,15 @@ final class LibraryService {
       return item
     }
 
-    let bookId: UUID = try await supabase
-      .rpc("upsert_book", params: ["book": candidate])
-      .execute()
-      .value
+    let bookId: UUID
+    if let known = candidate.bookId {
+      bookId = known
+    } else {
+      bookId = try await supabase
+        .rpc("upsert_book", params: ["book": candidate])
+        .execute()
+        .value
+    }
 
     let item: UserBook = try await supabase.from("user_books")
       .insert(UserBookInsert(bookId: bookId, status: status))

@@ -113,6 +113,15 @@ struct BookDetailView: View {
             confirmDelete = true
           }
           .frame(maxWidth: .infinity)
+          .confirmationDialog(
+            "Retirer « \(book.title) » de ta bibliothèque ?",
+            isPresented: $confirmDelete,
+            titleVisibility: .visible
+          ) {
+            Button("Retirer", role: .destructive) { Task { await delete() } }
+          } message: {
+            Text("Ta note, ton avis et ta progression seront perdus.")
+          }
         }
       }
     }
@@ -142,15 +151,6 @@ struct BookDetailView: View {
         Spacer()
         Button("OK") { focusedField = nil }
       }
-    }
-    .confirmationDialog(
-      "Retirer « \(book.title) » de ta bibliothèque ?",
-      isPresented: $confirmDelete,
-      titleVisibility: .visible
-    ) {
-      Button("Retirer", role: .destructive) { Task { await delete() } }
-    } message: {
-      Text("Ta note, ton avis et ta progression seront perdus.")
     }
   }
 

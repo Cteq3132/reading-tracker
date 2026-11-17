@@ -83,16 +83,20 @@ final class AuthService {
     }
   }
 
+  /// Mise à jour optimiste : l'interface change tout de suite, et revient en arrière si le serveur refuse.
   func setPrivate(_ isPrivate: Bool) async throws {
-    guard var updated = profile else { return }
-    updated.isPrivate = isPrivate
-    if !AppConfig.isDemo {
+    guard let current = profile, current.isPrivate != isPrivate else { return }
+    profile?.isPrivate = isPrivate
+    guard !AppConfig.isDemo else { return }
+    do {
       try await supabase.from("profiles")
         .update(["is_private": isPrivate])
-        .eq("id", value: updated.id)
+        .eq("id", value: current.id)
         .execute()
+    } catch {
+      profile?.isPrivate = current.isPrivate
+      throw error
     }
-    profile = updated
   }
 
   private func applyDemoSession() {

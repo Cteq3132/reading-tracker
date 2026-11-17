@@ -6,7 +6,6 @@ struct ProfileView: View {
   @Environment(LibraryService.self) private var library
   @Environment(SocialService.self) private var social
 
-  @State private var isUpdatingPrivacy = false
   @State private var confirmSignOut = false
   @State private var errorMessage: String?
 
@@ -31,7 +30,7 @@ struct ProfileView: View {
           Toggle(isOn: privacyBinding) {
             Label("Compte privé", systemImage: "lock")
           }
-          .disabled(auth.profile == nil || isUpdatingPrivacy)
+          .disabled(auth.profile == nil)
         } footer: {
           Text(
             auth.profile?.isPrivate == true
@@ -53,17 +52,17 @@ struct ProfileView: View {
             confirmSignOut = true
           }
           .frame(maxWidth: .infinity)
+          .confirmationDialog("Se déconnecter ?", isPresented: $confirmSignOut, titleVisibility: .visible) {
+            Button("Se déconnecter", role: .destructive) {
+              Task { await auth.signOut() }
+            }
+          }
         }
       }
       .listSectionSpacing(20)
       .contentMargins(.top, 0, for: .scrollContent)
       .navigationTitle("Profil")
       .navigationBarTitleDisplayMode(.inline)
-      .confirmationDialog("Se déconnecter ?", isPresented: $confirmSignOut, titleVisibility: .visible) {
-        Button("Se déconnecter", role: .destructive) {
-          Task { await auth.signOut() }
-        }
-      }
       .errorAlert($errorMessage)
     }
   }
@@ -98,8 +97,6 @@ struct ProfileView: View {
       get: { auth.profile?.isPrivate ?? false },
       set: { newValue in
         Task {
-          isUpdatingPrivacy = true
-          defer { isUpdatingPrivacy = false }
           do {
             try await auth.setPrivate(newValue)
           } catch {

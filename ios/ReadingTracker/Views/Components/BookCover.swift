@@ -13,22 +13,7 @@ struct BookCover: View {
       .aspectRatio(2.0 / 3.0, contentMode: .fit)
       .overlay {
         if let url {
-          AsyncImage(url: url, transaction: Transaction(animation: .easeOut(duration: 0.2))) { phase in
-            switch phase {
-            case .success(let image):
-              image.resizable().aspectRatio(contentMode: .fill)
-            case .failure:
-              CoverPlaceholder(title: title, author: author)
-            default:
-              Rectangle()
-                .fill(Color(.secondarySystemFill))
-                .overlay {
-                  Image(systemName: "book.closed")
-                    .font(.title3)
-                    .foregroundStyle(.tertiary)
-                }
-            }
-          }
+          RemoteCover(url: url, title: title, author: author)
         } else {
           CoverPlaceholder(title: title, author: author)
         }
