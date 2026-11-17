@@ -94,7 +94,7 @@ Colonnes : `user_book_id, user_id, username, display_name, avatar_url, book_id, 
 
 Corps : `{ "query": "camus etranger" }` ou `{ "isbn": "9782070360024" }`
 
-Réponse : `{ "results": [BookCandidate] }`, 20 résultats au maximum, sans doublons sur l'ISBN-13.
+Réponse : `{ "results": [BookCandidate] }`, 20 résultats au maximum, sans doublons sur l'ISBN-13, du plus pertinent au moins pertinent.
 
 ```json
 {
@@ -113,16 +113,25 @@ Réponse : `{ "results": [BookCandidate] }`, 20 résultats au maximum, sans doub
 
 Cache, pour limiter les appels aux sources externes (et le quota Hardcover partagé) :
 - **ISBN** : la table `books` fait foi. Une fiche complète (titre, auteurs, couverture) est renvoyée sans appeler les sources. Sinon les sources sont interrogées, au plus une fois tous les 30 jours par ISBN, et le résultat est enregistré dans `books` par `upsert_book` : chaque scan peuple le catalogue, et la réponse porte son `book_id`.
-- **Texte** : les résultats sont gardés 30 jours dans la table interne `search_cache`, clé = requête en minuscules sans accents ni ponctuation. Une réponse incomplète (une source en panne) n'est pas mise en cache. Les candidats ne sont pas enregistrés dans `books`.
+- **Texte** : les résultats sont gardés 30 jours dans la table interne `search_cache`, clé = requête en minuscules sans accents ni ponctuation. Une réponse incomplète (une source en panne ou trop lente) n'est pas mise en cache. Les candidats ne sont pas enregistrés dans `books`. Quand le classement change, les entrées texte (`q:…`) sont purgées par une migration (ex. `20261117190000_purge_search_cache_texte.sql`).
 - `search_cache` n'est accessible ni à `anon` ni à `authenticated` : seule la fonction la lit et l'écrit, avec la clé service.
 
-Sources, appelées en parallèle et fusionnées par ISBN-13 :
+Sources, appelées en parallèle. **Par ISBN**, les quatre, avec un délai de 6 s chacune, fusionnées par ISBN-13. **En texte**, Google Books et Hardcover seulement, avec un délai de 3 s chacune : on renvoie ce qui est arrivé à temps (la BnF et Open Library mettent de 2 à 60 s en texte et classent mal).
 1. **Google Books** : seulement si le secret `GOOGLE_BOOKS_API_KEY` est défini, car sans clé le quota est de 0. Données les plus riches.
 2. **Hardcover** (GraphQL, `https://api.hardcover.app/v1/graphql`, header `authorization: Bearer <jeton>`) : seulement si le secret `HARDCOVER_API_TOKEN` est défini. ISBN via `editions(where: isbn_13 / isbn_10)`, texte via `search(query_type: "Book")`. Un résultat texte est une œuvre : il ne porte pas d'ISBN, et son `source_id` vaut `book:<id>` (`edition:<id>` pour une recherche par ISBN). Le jeton est personnel, avec un quota partagé par tous les utilisateurs de l'app (offre gratuite : 60 requêtes/min, 5 000/jour), une expiration choisie à sa création et une réinitialisation possible sans préavis tant que l'API est en bêta. Scope suffisant : `read:catalog:search`.
-3. **BnF SRU** (`catalogue.bnf.fr/api/SRU`, `recordSchema=dublincore`, sans auth) : ISBN via `bib.isbn adj "<isbn>"` (essayer ISBN-13 puis ISBN-10), texte via `bib.anywhere all "<q>"`. On ne garde que `dc:type` « texte imprimé ». Il faut nettoyer : le titre (couper à « / »), les auteurs (« Camus, Albert (1913-1960). Auteur du texte » → « Albert Camus »), l'éditeur (retirer « (Paris) »), le nombre de pages tiré de `dc:format`, et l'ISBN tiré de `dc:identifier` « ISBN … ».
-4. **Open Library** : `search.json` pour le texte, `/isbn/<isbn>.json` pour l'ISBN. Sert aussi de couverture de secours : `https://covers.openlibrary.org/b/isbn/<isbn13>-L.jpg?default=false`.
+3. **BnF SRU** (`catalogue.bnf.fr/api/SRU`, `recordSchema=dublincore`, sans auth), par ISBN seulement : `bib.isbn adj "<isbn>"` (ISBN-13 et ISBN-10 dans la même requête). On ne garde que `dc:type` « texte imprimé ». Il faut nettoyer : le titre (couper à « / »), les auteurs (« Camus, Albert (1913-1960). Auteur du texte » → « Albert Camus »), l'éditeur (retirer « (Paris) »), le nombre de pages tiré de `dc:format`, et l'ISBN tiré de `dc:identifier` « ISBN … ».
+4. **Open Library**, par ISBN seulement : `/isbn/<isbn>.json`. Sert aussi de couverture de secours, en texte comme par ISBN : `https://covers.openlibrary.org/b/isbn/<isbn13>-L.jpg?default=false`.
 
-Ordre de priorité des champs : Google > Hardcover > BnF > Open Library. Toute `cover_url` est en https.
+Par ISBN, ordre de priorité des champs : Google > Hardcover > BnF > Open Library. Toute `cover_url` est en https.
+
+**Classement texte** (`supabase/functions/search-books/rank.ts`, poids commentés dans `WEIGHTS`). Les éditions d'une même œuvre sont regroupées (même ISBN-13, ou même titre et même nom du premier auteur, repliés sans accents, mentions d'édition entre parenthèses retirées, titres traduits connus de Hardcover compris) ; on n'en renvoie qu'une, celle au meilleur score propre : de préférence française, avec couverture et ISBN. Chaque œuvre reçoit un score :
+- correspondance du titre et des auteurs avec la requête : titre identique, titre qui commence par la requête, mots de la requête trouvés, requête égale à un auteur ;
+- roman ou fiction : `categories` de Google, `genres` et `tags` de Hardcover, d'une édition quelconque de l'œuvre ;
+- popularité : `users_count` de Hardcover, `ratingsCount` de Google, œuvre trouvée par les deux sources ;
+- édition française, couverture, ISBN, rang dans la source ;
+- forte pénalité pour les guides et analyses (« fiche de lecture », « analyse », « étude », « commentaire », « résumé », « Bac », « study guide », « summary »…, ou catégorie Google « Literary Criticism » / « Study Aids »), sauf si la requête en contient un ; pénalités plus légères pour les coffrets, les fiches sans auteur et les titres à mention d'édition.
+
+Un résultat Hardcover texte reste une œuvre sans ISBN (`book:<id>`) quand aucune édition Google ne la représente.
 
 ### Limites de débit
 

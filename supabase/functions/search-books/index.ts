@@ -3,13 +3,18 @@
 // POST { "query": "camus etranger" } ou { "isbn": "9782070360024" }
 // → { "results": BookCandidate[] }, 20 au maximum, sans doublon d'ISBN-13.
 //
-// Sources interrogées en parallèle, chacune avec son propre délai, puis
-// fusionnées par ISBN-13 avec la priorité Google > Hardcover > BnF > Open Library :
+// Sources interrogées en parallèle, chacune avec son propre délai :
 //   - Google Books, seulement si le secret GOOGLE_BOOKS_API_KEY existe ;
 //   - Hardcover (GraphQL), seulement si le secret HARDCOVER_API_TOKEN existe ;
-//   - BnF SRU en Dublin Core ;
-//   - Open Library.
+//   - BnF SRU en Dublin Core, par ISBN seulement ;
+//   - Open Library, par ISBN seulement (et couverture de secours par URL).
 // Une source en panne ou trop lente est simplement ignorée.
+//
+// Par ISBN, les résultats sont fusionnés par ISBN-13 avec la priorité
+// Google > Hardcover > BnF > Open Library. En texte, Google et Hardcover seuls,
+// avec un délai court, et un score (rank.ts) : roman ou fiction, popularité,
+// français, couverture, ISBN, correspondance avec la requête, guides et
+// analyses relégués ; les éditions d'une même œuvre sont regroupées.
 //
 // Cache (docs/CONTRAT.md) :
 //   - ISBN : la table books fait foi. Une fiche complète est renvoyée sans
@@ -26,6 +31,8 @@
 //   - Hardcover : plafond global d'appels sortants ; une fois atteint, la
 //     recherche continue sans Hardcover, et son résultat n'est gardé qu'un jour
 //     en cache.
+
+import { fold, type Hit, rankText, type Signals } from "./rank.ts";
 
 type Source = "google" | "hardcover" | "bnf" | "openlibrary";
 
@@ -52,8 +59,14 @@ type SearchInput = { kind: "isbn"; isbn13: string; isbn10: string | null } | {
 };
 
 const MAX_RESULTS = 20;
-const SOURCE_TIMEOUT_MS = 6000;
-const PRIORITY: Source[] = ["google", "hardcover", "bnf", "openlibrary"];
+// Par ISBN, on attend les sources lentes (BnF, Open Library) : un scan doit
+// trouver le livre. En texte, Google et Hardcover répondent en moins d'une
+// seconde d'habitude ; on renvoie ce qui est arrivé à temps.
+const ISBN_TIMEOUT_MS = 6000;
+const QUERY_TIMEOUT_MS = 3000;
+// Candidats demandés à Google en texte : plus que MAX_RESULTS, car les
+// éditions d'une même œuvre sont ensuite regroupées.
+const GOOGLE_QUERY_RESULTS = 30;
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -176,28 +189,36 @@ async function searchByQuery(
   } else {
     const external = await searchExternal(input, db);
     results = external.results;
-    // Un résultat dégradé (source en panne) n'est pas mis en cache.
+    // Un résultat dégradé (source en panne ou trop lente) n'est pas mis en
+    // cache. L'écriture se fait après la réponse.
     if (external.complete && results.length > 0) {
-      await db.writeCache(key, results, external.cacheTtlMs);
+      inBackground(db.writeCache(key, results, external.cacheTtlMs));
     }
   }
   return await db.annotate(results);
 }
 
-function normalizeQuery(q: string): string {
-  return q.toLowerCase().normalize("NFKD").replace(/\p{M}/gu, "")
-    .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+// Laisse une tâche (qui ne lève jamais) se terminer après l'envoi de la
+// réponse : EdgeRuntime.waitUntil sur Supabase empêche l'arrêt du worker avant.
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void } | undefined;
+
+function inBackground(task: Promise<unknown>): void {
+  if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(task);
 }
+
+// Clé de cache : minuscules sans accents ni ponctuation.
+const normalizeQuery = fold;
 
 function isComplete(b: BookCandidate): boolean {
   return !!b.title && b.authors.length > 0 && !!b.cover_url;
 }
 
-// Interroge toutes les sources, après avoir pris la part « externe » de la
-// limite de l'utilisateur (RateLimited si elle est dépassée).
-// complete = aucune source activée n'a échoué. Si le plafond Hardcover a
-// écarté Hardcover, le résultat reste bon mais n'est gardé qu'un jour en
-// cache, pour que Hardcover y figure dès que le plafond est rendu.
+// Interroge les sources, après avoir pris la part « externe » de la limite de
+// l'utilisateur (RateLimited si elle est dépassée) : les quatre par ISBN,
+// Google et Hardcover en texte.
+// complete = aucune source activée n'a échoué ni dépassé son délai. Si le
+// plafond Hardcover a écarté Hardcover, le résultat reste bon mais n'est gardé
+// qu'un jour en cache, pour que Hardcover y figure dès que le plafond est rendu.
 async function searchExternal(
   input: SearchInput,
   db: Db,
@@ -205,39 +226,55 @@ async function searchExternal(
   const verdict = await db.rateLimit("external");
   if (verdict.retryAfter > 0) throw new RateLimited(verdict);
 
+  const timeout = input.kind === "isbn" ? ISBN_TIMEOUT_MS : QUERY_TIMEOUT_MS;
   const googleKey = Deno.env.get("GOOGLE_BOOKS_API_KEY")?.trim();
   const hardcoverToken = Deno.env.get("HARDCOVER_API_TOKEN")?.trim();
   let hardcoverCapped = false;
-  const tasks: Promise<BookCandidate[] | null>[] = [
-    googleKey ? withSource("google", (s) => searchGoogle(input, googleKey, s)) : Promise.resolve([]),
+  const none = Promise.resolve([] as BookHit[]);
+  const [google, hardcover, bnf, openlibrary] = await Promise.all([
+    googleKey ? withSource("google", timeout, (s) => searchGoogle(input, googleKey, s)) : none,
     hardcoverToken
       ? db.takeHardcover().then((ok) => {
-        if (ok) return withSource("hardcover", (s) => searchHardcover(input, hardcoverToken, s));
+        if (ok) {
+          return withSource("hardcover", timeout, (s) => searchHardcover(input, hardcoverToken, s));
+        }
         hardcoverCapped = true;
         return [];
       })
-      : Promise.resolve([]),
-    withSource("bnf", (s) => searchBnf(input, s)),
-    withSource("openlibrary", (s) => searchOpenLibrary(input, s)),
-  ];
-  const [google, hardcover, bnf, openlibrary] = await Promise.all(tasks);
+      : none,
+    input.kind === "isbn"
+      ? withSource("bnf", timeout, (s) => searchBnf(input, s).then(plain))
+      : none,
+    input.kind === "isbn"
+      ? withSource(
+        "openlibrary",
+        timeout,
+        (s) => openLibraryByIsbn(input.isbn13, input.isbn10, s).then(plain),
+      )
+      : none,
+  ]);
   const complete = [google, hardcover, bnf, openlibrary].every((r) => r !== null);
 
-  // Par ISBN, seul le livre demandé compte : Google renvoie parfois des volumes
-  // sans ISBN ou voisins pour une requête « isbn: ».
-  const keep = (list: BookCandidate[] | null) =>
-    (list ?? []).filter((c) => input.kind !== "isbn" || c.isbn13 === input.isbn13);
-  const results = merge({
-    google: keep(google),
-    hardcover: keep(hardcover),
-    bnf: keep(bnf),
-    openlibrary: keep(openlibrary),
-  });
-  const n = (r: BookCandidate[] | null) => (r === null ? "échec" : String(r.length));
+  let results: BookCandidate[];
+  if (input.kind === "isbn") {
+    // Par ISBN, seul le livre demandé compte : Google renvoie parfois des
+    // volumes sans ISBN ou voisins pour une requête « isbn: ».
+    const keep = (list: BookHit[] | null) =>
+      (list ?? []).map((h) => h.candidate).filter((c) => c.isbn13 === input.isbn13);
+    results = mergeEditions(
+      [...keep(google), ...keep(hardcover), ...keep(bnf), ...keep(openlibrary)],
+    );
+  } else {
+    results = rankText({ google: google ?? [], hardcover: hardcover ?? [] }, input.query)
+      .slice(0, MAX_RESULTS)
+      .map((group) => withFallbackCover(group.best));
+  }
+  const n = (r: BookHit[] | null) => (r === null ? "échec" : String(r.length));
   console.log(
     `search-books: ${input.kind} → sources google=${n(google)} ` +
-      `hardcover=${hardcoverCapped ? "plafond" : n(hardcover)} ` +
-      `bnf=${n(bnf)} openlibrary=${n(openlibrary)} → ${results.length}`,
+      `hardcover=${hardcoverCapped ? "plafond" : n(hardcover)}` +
+      (input.kind === "isbn" ? ` bnf=${n(bnf)} openlibrary=${n(openlibrary)}` : "") +
+      ` → ${results.length}`,
   );
   return { results, complete, cacheTtlMs: hardcoverCapped ? CAPPED_CACHE_TTL_MS : CACHE_TTL_MS };
 }
@@ -490,12 +527,19 @@ function parseInput(body: unknown): SearchInput | { error: string } {
   return { error: "Attendu : { \"query\": \"…\" } ou { \"isbn\": \"…\" }." };
 }
 
+// Un candidat et les signaux de classement que sa source fournit.
+type BookHit = Hit<BookCandidate>;
+
+const plain = (candidates: BookCandidate[]): BookHit[] =>
+  candidates.map((candidate) => ({ candidate, signals: {} }));
+
 // Chaque source a son propre délai ; une erreur ou un dépassement donne null.
 async function withSource(
   name: Source,
-  run: (signal: AbortSignal) => Promise<BookCandidate[]>,
-): Promise<BookCandidate[] | null> {
-  const signal = AbortSignal.timeout(SOURCE_TIMEOUT_MS);
+  timeoutMs: number,
+  run: (signal: AbortSignal) => Promise<BookHit[]>,
+): Promise<BookHit[] | null> {
+  const signal = AbortSignal.timeout(timeoutMs);
   try {
     return await run(signal);
   } catch (error) {
@@ -615,24 +659,38 @@ function toIso6391(code: string | null | undefined): string | null {
 // Google Books
 // ---------------------------------------------------------------------------
 
+// Seuls les champs utiles sont demandés : la réponse est plus légère.
+const GOOGLE_FIELDS = "items(id,volumeInfo(title,subtitle,authors,publisher,publishedDate," +
+  "pageCount,description,language,industryIdentifiers,imageLinks,categories,ratingsCount))";
+
 async function searchGoogle(
   input: SearchInput,
   key: string,
   signal: AbortSignal,
-): Promise<BookCandidate[]> {
+): Promise<BookHit[]> {
   const q = input.kind === "isbn" ? `isbn:${input.isbn13}` : input.query;
   const url = new URL("https://www.googleapis.com/books/v1/volumes");
   url.searchParams.set("q", q);
-  url.searchParams.set("maxResults", String(MAX_RESULTS));
+  url.searchParams.set(
+    "maxResults",
+    String(input.kind === "isbn" ? MAX_RESULTS : GOOGLE_QUERY_RESULTS),
+  );
   url.searchParams.set("printType", "books");
+  url.searchParams.set("fields", GOOGLE_FIELDS);
   url.searchParams.set("key", key);
 
   const data = await fetchJson(url.toString(), signal) as
     | { items?: GoogleVolume[] }
     | null;
   return (data?.items ?? []).flatMap((item) => {
-    const c = googleToCandidate(item);
-    return c ? [c] : [];
+    const candidate = googleToCandidate(item);
+    if (!candidate) return [];
+    const v = item.volumeInfo;
+    const signals: Signals = {
+      categories: v?.categories ?? [],
+      ratings: typeof v?.ratingsCount === "number" ? v.ratingsCount : 0,
+    };
+    return [{ candidate, signals }];
   });
 }
 
@@ -649,6 +707,8 @@ interface GoogleVolume {
     language?: string;
     industryIdentifiers?: { type?: string; identifier?: string }[];
     imageLinks?: Record<string, string>;
+    categories?: string[];
+    ratingsCount?: number;
   };
 }
 
@@ -713,7 +773,7 @@ async function searchHardcover(
   input: SearchInput,
   token: string,
   signal: AbortSignal,
-): Promise<BookCandidate[]> {
+): Promise<BookHit[]> {
   if (input.kind === "isbn") {
     const where = input.isbn10
       ? "{ _or: [{ isbn_13: { _eq: $isbn13 } }, { isbn_10: { _eq: $isbn10 } }] }"
@@ -727,10 +787,10 @@ async function searchHardcover(
       token,
       signal,
     ) as { editions?: HardcoverEdition[] } | null;
-    return (data?.editions ?? []).flatMap((e) => {
+    return plain((data?.editions ?? []).flatMap((e) => {
       const c = hardcoverEditionToCandidate(e);
       return c ? [c] : [];
-    });
+    }));
   }
 
   const data = await hardcoverQuery(
@@ -742,8 +802,16 @@ async function searchHardcover(
     signal,
   ) as { search?: { results?: { hits?: { document?: HardcoverSearchDoc }[] } } } | null;
   return (data?.search?.results?.hits ?? []).flatMap((hit) => {
-    const c = hit.document ? hardcoverDocToCandidate(hit.document) : null;
-    return c ? [c] : [];
+    const d = hit.document;
+    const candidate = d ? hardcoverDocToCandidate(d) : null;
+    if (!d || !candidate) return [];
+    const signals: Signals = {
+      genres: [...labels(d.genres), ...labels(d.tags)],
+      readers: typeof d.users_count === "number" ? d.users_count : 0,
+      compilation: d.compilation === true,
+      altTitles: labels(d.alternative_titles),
+    };
+    return [{ candidate, signals }];
   });
 }
 
@@ -812,6 +880,25 @@ interface HardcoverSearchDoc {
   pages?: number | null;
   release_year?: number | null;
   image?: { url?: string | null } | null;
+  // Signaux de classement (champs du document de recherche, doc Hardcover
+  // api/guides/Searching.mdx) : genres et tags (les 5 premiers), nombre de
+  // lecteurs qui ont enregistré le livre, recueil, titres traduits.
+  genres?: unknown;
+  tags?: unknown;
+  users_count?: number | null;
+  compilation?: boolean | null;
+  alternative_titles?: unknown; // titres de l'œuvre dans d'autres langues
+}
+
+// genres et tags : des chaînes, ou des objets { tag } selon les documents.
+function labels(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((v) => {
+    if (typeof v === "string") return [v];
+    const tag = (v as { tag?: unknown; name?: unknown } | null)?.tag ??
+      (v as { name?: unknown } | null)?.name;
+    return typeof tag === "string" ? [tag] : [];
+  });
 }
 
 // Auteurs seulement : une contribution vide ou « Author » (pas les traducteurs,
@@ -880,18 +967,22 @@ function hardcoverDocToCandidate(d: HardcoverSearchDoc): BookCandidate | null {
 // BnF SRU (Dublin Core)
 // ---------------------------------------------------------------------------
 
-async function searchBnf(input: SearchInput, signal: AbortSignal): Promise<BookCandidate[]> {
+// Par ISBN seulement : en texte libre, la BnF est lente (2 à 7 s) et classe
+// mal (disques, études critiques avant l'œuvre).
+async function searchBnf(
+  input: Extract<SearchInput, { kind: "isbn" }>,
+  signal: AbortSignal,
+): Promise<BookCandidate[]> {
   // La BnF n'indexe souvent que l'ISBN-10 des livres anciens : on interroge
   // les deux formes dans une seule requête.
-  const cql = input.kind === "isbn"
-    ? [input.isbn13, input.isbn10].filter(Boolean).map((i) => `bib.isbn adj "${i}"`).join(" or ")
-    : `bib.anywhere all "${input.query.replace(/["\\]/g, " ")}"`;
+  const cql = [input.isbn13, input.isbn10].filter(Boolean)
+    .map((i) => `bib.isbn adj "${i}"`).join(" or ");
 
   const url = new URL("https://catalogue.bnf.fr/api/SRU");
   url.searchParams.set("version", "1.2");
   url.searchParams.set("operation", "searchRetrieve");
   url.searchParams.set("recordSchema", "dublincore");
-  url.searchParams.set("maximumRecords", input.kind === "isbn" ? "5" : "30");
+  url.searchParams.set("maximumRecords", "5");
   url.searchParams.set("query", cql);
 
   const res = await fetch(url.toString(), { signal, headers: { Accept: "application/xml" } });
@@ -995,17 +1086,8 @@ function cleanBnfPublisher(raw: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Open Library
+// Open Library (par ISBN seulement : en texte, search.json met 2 à 60 s)
 // ---------------------------------------------------------------------------
-
-async function searchOpenLibrary(
-  input: SearchInput,
-  signal: AbortSignal,
-): Promise<BookCandidate[]> {
-  return input.kind === "isbn"
-    ? await openLibraryByIsbn(input.isbn13, input.isbn10, signal)
-    : await openLibraryByQuery(input.query, signal);
-}
 
 interface OlEdition {
   key?: string;
@@ -1070,138 +1152,44 @@ async function openLibraryByIsbn(
   }];
 }
 
-interface OlSearchDoc {
-  key?: string;
-  title?: string;
-  subtitle?: string;
-  author_name?: string[];
-  first_publish_year?: number;
-  cover_i?: number;
-  language?: string[];
-  editions?: {
-    docs?: {
-      key?: string;
-      title?: string;
-      subtitle?: string;
-      isbn?: string[];
-      publisher?: string[];
-      publish_date?: string[];
-      language?: string[];
-      cover_i?: number;
-    }[];
+// ---------------------------------------------------------------------------
+// Fusion par ISBN
+// ---------------------------------------------------------------------------
+
+// Fusionne les fiches d'une même édition (même ISBN-13), données dans l'ordre
+// de priorité Google > Hardcover > BnF > Open Library : pour chaque champ, la
+// première source non vide l'emporte.
+function mergeEditions(items: BookCandidate[]): BookCandidate[] {
+  const best = items[0];
+  if (!best) return [];
+  const first = <K extends keyof BookCandidate>(field: K): BookCandidate[K] | null => {
+    for (const item of items) {
+      const v = item[field];
+      if (v !== null && v !== undefined && !(Array.isArray(v) && v.length === 0)) return v;
+    }
+    return null;
   };
+  return [withFallbackCover({
+    isbn13: first("isbn13"),
+    isbn10: first("isbn10"),
+    title: best.title,
+    subtitle: first("subtitle"),
+    authors: first("authors") ?? [],
+    publisher: first("publisher"),
+    published_date: first("published_date"),
+    page_count: first("page_count"),
+    description: first("description"),
+    language: first("language"),
+    cover_url: first("cover_url"),
+    source: best.source,
+    source_id: best.source_id,
+  })];
 }
 
-async function openLibraryByQuery(query: string, signal: AbortSignal): Promise<BookCandidate[]> {
-  const url = new URL("https://openlibrary.org/search.json");
-  url.searchParams.set("q", query);
-  url.searchParams.set("limit", String(MAX_RESULTS));
-  url.searchParams.set("lang", "fr");
-  url.searchParams.set(
-    "fields",
-    [
-      "key", "title", "subtitle", "author_name", "first_publish_year", "cover_i", "language",
-      "editions", "editions.key", "editions.title", "editions.subtitle", "editions.isbn",
-      "editions.publisher", "editions.publish_date", "editions.language", "editions.cover_i",
-    ].join(","),
-  );
-
-  const data = await fetchJson(url.toString(), signal) as { docs?: OlSearchDoc[] } | null;
-  return (data?.docs ?? []).flatMap((doc) => {
-    // L'édition la plus pertinente renvoyée par Open Library, sinon l'œuvre.
-    const ed = doc.editions?.docs?.[0];
-    const title = clean(ed?.title) ?? clean(doc.title);
-    if (!title) return [];
-    const ids = pickIsbns(ed?.isbn ?? []);
-    const coverId = ed?.cover_i ?? doc.cover_i;
-    const cover = coverId && coverId > 0
-      ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg`
-      : ids.isbn13
-      ? openLibraryCover(ids.isbn13)
-      : null;
-    const key = ed?.key ?? doc.key;
-
-    return [{
-      isbn13: ids.isbn13,
-      isbn10: ids.isbn10,
-      title: title.replace(/\.$/, ""),
-      subtitle: clean(ed ? ed.subtitle : doc.subtitle),
-      authors: (doc.author_name ?? []).map(clean).filter((a): a is string => !!a),
-      publisher: clean(ed?.publisher?.[0]),
-      published_date: clean(ed?.publish_date?.[0]) ??
-        (doc.first_publish_year ? String(doc.first_publish_year) : null),
-      page_count: null,
-      description: null,
-      language: toIso6391(ed?.language?.[0] ?? doc.language?.[0]),
-      cover_url: cover,
-      source: "openlibrary" as const,
-      source_id: clean(key?.replace(/^\/(books|works)\//, "")),
-    }];
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Fusion
-// ---------------------------------------------------------------------------
-
-// Fusionne par ISBN-13. Pour chaque champ, la première source non vide dans
-// l'ordre Google > Hardcover > BnF > Open Library l'emporte. L'ordre des
-// résultats suit le meilleur rang obtenu dans l'une des sources ; à rang égal,
-// la pertinence de Google, Hardcover puis Open Library passe avant celle de la
-// BnF, plus faible en texte libre (elle classe les études critiques avant l'œuvre).
-const RANKING: Record<Source, number> = { google: 0, hardcover: 1, openlibrary: 2, bnf: 3 };
-
-function merge(bySource: Record<Source, BookCandidate[]>): BookCandidate[] {
-  type Group = { rank: number; priority: number; items: BookCandidate[] };
-  const groups = new Map<string, Group>();
-
-  PRIORITY.forEach((source) => {
-    const priority = RANKING[source];
-    bySource[source].forEach((candidate, rank) => {
-      const key = candidate.isbn13
-        ? `isbn:${candidate.isbn13}`
-        : `src:${candidate.source}:${candidate.source_id ?? `${rank}`}`;
-      const group = groups.get(key);
-      if (group) {
-        group.items.push(candidate);
-        if (rank < group.rank || (rank === group.rank && priority < group.priority)) {
-          group.rank = rank;
-          group.priority = priority;
-        }
-      } else {
-        groups.set(key, { rank, priority, items: [candidate] });
-      }
-    });
-  });
-
-  return [...groups.values()]
-    .sort((a, b) => a.rank - b.rank || a.priority - b.priority)
-    .slice(0, MAX_RESULTS)
-    .map(({ items }) => {
-      // Les items sont déjà dans l'ordre de priorité des sources.
-      const first = <K extends keyof BookCandidate>(field: K): BookCandidate[K] | null => {
-        for (const item of items) {
-          const v = item[field];
-          if (v !== null && v !== undefined && !(Array.isArray(v) && v.length === 0)) return v;
-        }
-        return null;
-      };
-      const best = items[0];
-      const isbn13 = first("isbn13");
-      return {
-        isbn13,
-        isbn10: first("isbn10"),
-        title: best.title,
-        subtitle: first("subtitle"),
-        authors: first("authors") ?? [],
-        publisher: first("publisher"),
-        published_date: first("published_date"),
-        page_count: first("page_count"),
-        description: first("description"),
-        language: first("language"),
-        cover_url: toHttps(first("cover_url")) ?? (isbn13 ? openLibraryCover(isbn13) : null),
-        source: best.source,
-        source_id: best.source_id,
-      };
-    });
+// Couverture en https, sinon celle d'Open Library par ISBN.
+function withFallbackCover(c: BookCandidate): BookCandidate {
+  return {
+    ...c,
+    cover_url: toHttps(c.cover_url) ?? (c.isbn13 ? openLibraryCover(c.isbn13) : null),
+  };
 }
