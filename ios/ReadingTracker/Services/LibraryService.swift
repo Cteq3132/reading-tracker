@@ -59,13 +59,17 @@ final class LibraryService {
   func add(_ candidate: BookCandidate, status: ReadingStatus, userId: UUID) async throws -> UserBook {
     if let existing = existing(for: candidate) {
       var update = UserBookUpdate(existing)
-      update.status = status
+      update.setStatus(status, from: existing, today: PostgresDate.today())
       return try await save(id: existing.id, update: update)
     }
 
     if AppConfig.isDemo {
       let book = DemoData.book(from: candidate)
-      let item = UserBook(userId: userId, book: book, status: status, updatedAt: ISO8601DateFormatter().string(from: .now))
+      let insert = UserBookInsert(bookId: book.id, status: status, today: PostgresDate.today())
+      let item = UserBook(
+        userId: userId, book: book, status: status, startedAt: insert.startedAt, finishedAt: insert.finishedAt,
+        updatedAt: ISO8601DateFormatter().string(from: .now)
+      )
       items.insert(item, at: 0)
       return item
     }
@@ -81,7 +85,7 @@ final class LibraryService {
     }
 
     let item: UserBook = try await supabase.from("user_books")
-      .insert(UserBookInsert(bookId: bookId, status: status))
+      .insert(UserBookInsert(bookId: bookId, status: status, today: PostgresDate.today()))
       .select(Self.selectWithBook)
       .single()
       .execute()
@@ -90,33 +94,37 @@ final class LibraryService {
     return item
   }
 
+  /// Enregistre `update` de façon optimiste : la bibliothèque change tout de suite, et revient
+  /// à l'état précédent si le backend refuse (l'erreur est relancée pour être affichée).
   @discardableResult
   func save(id: UUID, update: UserBookUpdate) async throws -> UserBook {
     guard let index = items.firstIndex(where: { $0.id == id }) else { throw CocoaError(.fileNoSuchFile) }
+    let previous = items[index]
+    let optimistic = previous.applying(update, today: PostgresDate.today())
+    items[index] = optimistic
 
-    if AppConfig.isDemo {
-      var item = items[index]
-      if update.status == .reading, item.startedAt == nil { item.startedAt = DemoData.day(0) }
-      if update.status == .read, item.finishedAt == nil { item.finishedAt = DemoData.day(0) }
-      item.status = update.status
-      item.currentPage = update.currentPage
-      item.rating = update.rating
-      item.review = update.review
-      item.isFavorite = update.isFavorite
-      item.updatedAt = ISO8601DateFormatter().string(from: .now)
-      items[index] = item
-      return item
+    if AppConfig.isDemo { return optimistic }
+
+    do {
+      let saved: UserBook = try await supabase.from("user_books")
+        .update(update)
+        .eq("id", value: id)
+        .select(Self.selectWithBook)
+        .single()
+        .execute()
+        .value
+      replace(id: id, with: saved, ifStillEqualTo: optimistic)
+      return saved
+    } catch {
+      replace(id: id, with: previous, ifStillEqualTo: optimistic)
+      throw error
     }
+  }
 
-    let item: UserBook = try await supabase.from("user_books")
-      .update(update)
-      .eq("id", value: id)
-      .select(Self.selectWithBook)
-      .single()
-      .execute()
-      .value
+  /// Remplace la ligne, sauf si un autre enregistrement l'a modifiée entre-temps.
+  private func replace(id: UUID, with item: UserBook, ifStillEqualTo expected: UserBook) {
+    guard let index = items.firstIndex(where: { $0.id == id }), items[index] == expected else { return }
     items[index] = item
-    return item
   }
 
   func remove(id: UUID) async throws {

@@ -8,10 +8,7 @@ enum DemoData {
   )
 
   static func day(_ daysAgo: Int) -> String {
-    let date = Calendar.current.date(byAdding: .day, value: -daysAgo, to: .now) ?? .now
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withFullDate]
-    return f.string(from: date)
+    PostgresDate.day(from: Calendar.current.date(byAdding: .day, value: -daysAgo, to: .now) ?? .now)
   }
 
   static func timestamp(hoursAgo: Double) -> String {
