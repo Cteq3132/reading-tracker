@@ -10,10 +10,19 @@
 //   - BnF SRU en Dublin Core ;
 //   - Open Library.
 // Une source en panne ou trop lente est simplement ignorée.
+//
+// Cache (docs/CONTRAT.md) :
+//   - ISBN : la table books fait foi. Une fiche complète est renvoyée sans
+//     appeler les sources ; sinon on les interroge, au plus une fois par
+//     30 jours (search_cache « isbn:… »), et on enregistre le résultat avec
+//     upsert_book.
+//   - Texte : les résultats sont gardés 30 jours dans search_cache (« q:… »).
+//   - book_id est posé sur chaque résultat déjà présent dans books.
 
 type Source = "google" | "hardcover" | "bnf" | "openlibrary";
 
 interface BookCandidate {
+  book_id?: string | null;
   isbn13: string | null;
   isbn10: string | null;
   title: string;
@@ -25,7 +34,7 @@ interface BookCandidate {
   description: string | null;
   language: string | null;
   cover_url: string | null;
-  source: Source;
+  source: Source | "manual";
   source_id: string | null;
 }
 
@@ -55,7 +64,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method !== "POST") {
     return json({ error: "Méthode non autorisée, utiliser POST." }, 405);
   }
-  if (!(await isSignedInUser(req))) {
+  const userToken = await signedInUserToken(req);
+  if (!userToken) {
     return json({ error: "Session utilisateur requise." }, 401);
   }
 
@@ -71,9 +81,77 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return json({ error: input.error }, 400);
   }
 
+  const db = new Db(userToken, req.headers.get("apikey"));
+  const results = input.kind === "isbn"
+    ? await searchByIsbn(input, db)
+    : await searchByQuery(input, db);
+  return json({ results });
+});
+
+const CACHE_TTL_MS = 30 * 24 * 3600 * 1000;
+
+async function searchByIsbn(
+  input: Extract<SearchInput, { kind: "isbn" }>,
+  db: Db,
+): Promise<BookCandidate[]> {
+  const row = await db.bookByIsbn(input.isbn13);
+  if (row && isComplete(row)) {
+    console.log("search-books: isbn → books (sans appel externe)");
+    return [row];
+  }
+
+  // Fiche absente ou incomplète : sources interrogées au plus une fois par TTL.
+  const key = `isbn:${input.isbn13}`;
+  const cached = await db.readCache(key);
+  if (cached !== null) {
+    console.log("search-books: isbn → search_cache (sans appel externe)");
+    return row ? [row] : await db.annotate(cached);
+  }
+
+  const external = await searchExternal(input);
+  if (external.complete) await db.writeCache(key, external.results);
+  const found = external.results[0];
+  if (!found) return row ? [row] : [];
+
+  // Chaque scan peuple books ; on renvoie la fiche telle qu'enregistrée.
+  const id = await db.upsertBook(found);
+  const saved = id ? await db.bookById(id) : null;
+  return saved ? [saved] : await db.annotate(external.results);
+}
+
+async function searchByQuery(
+  input: Extract<SearchInput, { kind: "query" }>,
+  db: Db,
+): Promise<BookCandidate[]> {
+  const key = `q:${normalizeQuery(input.query)}`;
+  let results = await db.readCache(key);
+  if (results !== null) {
+    console.log("search-books: query → search_cache (sans appel externe)");
+  } else {
+    const external = await searchExternal(input);
+    results = external.results;
+    // Un résultat dégradé (source en panne) n'est pas mis en cache.
+    if (external.complete && results.length > 0) await db.writeCache(key, results);
+  }
+  return await db.annotate(results);
+}
+
+function normalizeQuery(q: string): string {
+  return q.toLowerCase().normalize("NFKD").replace(/\p{M}/gu, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+function isComplete(b: BookCandidate): boolean {
+  return !!b.title && b.authors.length > 0 && !!b.cover_url;
+}
+
+// Interroge toutes les sources. complete = aucune source activée n'a échoué.
+async function searchExternal(
+  input: SearchInput,
+): Promise<{ results: BookCandidate[]; complete: boolean }> {
   const googleKey = Deno.env.get("GOOGLE_BOOKS_API_KEY")?.trim();
   const hardcoverToken = Deno.env.get("HARDCOVER_API_TOKEN")?.trim();
-  const tasks: Promise<BookCandidate[]>[] = [
+  const tasks: Promise<BookCandidate[] | null>[] = [
     googleKey ? withSource("google", (s) => searchGoogle(input, googleKey, s)) : Promise.resolve([]),
     hardcoverToken
       ? withSource("hardcover", (s) => searchHardcover(input, hardcoverToken, s))
@@ -82,32 +160,194 @@ Deno.serve(async (req: Request): Promise<Response> => {
     withSource("openlibrary", (s) => searchOpenLibrary(input, s)),
   ];
   const [google, hardcover, bnf, openlibrary] = await Promise.all(tasks);
+  const complete = [google, hardcover, bnf, openlibrary].every((r) => r !== null);
 
   // Par ISBN, seul le livre demandé compte : Google renvoie parfois des volumes
   // sans ISBN ou voisins pour une requête « isbn: ».
-  const keep = (list: BookCandidate[]) =>
-    input.kind === "isbn" ? list.filter((c) => c.isbn13 === input.isbn13) : list;
+  const keep = (list: BookCandidate[] | null) =>
+    (list ?? []).filter((c) => input.kind !== "isbn" || c.isbn13 === input.isbn13);
   const results = merge({
     google: keep(google),
     hardcover: keep(hardcover),
     bnf: keep(bnf),
     openlibrary: keep(openlibrary),
   });
+  const n = (r: BookCandidate[] | null) => (r === null ? "échec" : String(r.length));
   console.log(
-    `search-books: ${input.kind} google=${google.length} hardcover=${hardcover.length} ` +
-      `bnf=${bnf.length} openlibrary=${openlibrary.length} → ${results.length}`,
+    `search-books: ${input.kind} → sources google=${n(google)} hardcover=${n(hardcover)} ` +
+      `bnf=${n(bnf)} openlibrary=${n(openlibrary)} → ${results.length}`,
   );
-  return json({ results });
-});
+  return { results, complete };
+}
+
+// ---------------------------------------------------------------------------
+// Base Supabase (PostgREST) : books avec le jeton de l'utilisateur (RLS),
+// search_cache avec la clé service. Une panne de base ne bloque jamais la
+// recherche : on se comporte comme sans cache.
+// ---------------------------------------------------------------------------
+
+const BOOK_COLUMNS = "id,isbn13,isbn10,title,subtitle,authors,publisher,published_date," +
+  "page_count,description,language,cover_url,source,source_id";
+
+type BookRow = Omit<BookCandidate, "book_id"> & { id: string };
+
+class Db {
+  private readonly url = Deno.env.get("SUPABASE_URL") ?? "";
+  private readonly serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+  private readonly userToken: string;
+  private readonly anonKey: string;
+
+  constructor(userToken: string, apikey: string | null) {
+    this.userToken = userToken;
+    this.anonKey = apikey ?? Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+  }
+
+  private async request(
+    path: string,
+    init: { method?: string; body?: unknown; service?: boolean; prefer?: string } = {},
+  ): Promise<unknown> {
+    const key = init.service ? this.serviceKey : this.anonKey;
+    const headers: Record<string, string> = {
+      apikey: key,
+      Authorization: `Bearer ${init.service ? this.serviceKey : this.userToken}`,
+      "Content-Type": "application/json",
+    };
+    if (init.prefer) headers.Prefer = init.prefer;
+    const res = await fetch(`${this.url}${path}`, {
+      method: init.method ?? "GET",
+      headers,
+      body: init.body === undefined ? undefined : JSON.stringify(init.body),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`HTTP ${res.status} ${path.split("?")[0]} ${text.slice(0, 200)}`);
+    }
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
+  }
+
+  private async safe<T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await fn();
+    } catch (error) {
+      console.warn(`search-books: ${label} impossible`, String(error));
+      return fallback;
+    }
+  }
+
+  bookByIsbn(isbn13: string): Promise<BookCandidate | null> {
+    return this.safe("lecture de books", async () => {
+      const rows = await this.request(
+        `/rest/v1/books?isbn13=eq.${isbn13}&select=${BOOK_COLUMNS}`,
+      ) as BookRow[];
+      return rows[0] ? rowToCandidate(rows[0]) : null;
+    }, null);
+  }
+
+  bookById(id: string): Promise<BookCandidate | null> {
+    return this.safe("lecture de books", async () => {
+      const rows = await this.request(
+        `/rest/v1/books?id=eq.${encodeURIComponent(id)}&select=${BOOK_COLUMNS}`,
+      ) as BookRow[];
+      return rows[0] ? rowToCandidate(rows[0]) : null;
+    }, null);
+  }
+
+  upsertBook(candidate: BookCandidate): Promise<string | null> {
+    return this.safe("upsert_book", async () => {
+      const { book_id: _ignored, ...book } = candidate;
+      const id = await this.request("/rest/v1/rpc/upsert_book", {
+        method: "POST",
+        body: { book },
+      });
+      return typeof id === "string" ? id : null;
+    }, null);
+  }
+
+  // Pose book_id sur les candidats déjà présents dans books (par ISBN-13, sinon
+  // par source et source_id).
+  annotate(candidates: BookCandidate[]): Promise<BookCandidate[]> {
+    const plain = candidates.map((c) => ({ ...c, book_id: null as string | null }));
+    const isbns = [...new Set(plain.map((c) => c.isbn13).filter((i): i is string => !!i))];
+    const sourceIds = [
+      ...new Set(plain.map((c) => c.source_id).filter((i): i is string => !!i)),
+    ];
+    if (isbns.length === 0 && sourceIds.length === 0) return Promise.resolve(plain);
+
+    return this.safe("annotation book_id", async () => {
+      const quote = (v: string) => `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+      const filters = [];
+      if (isbns.length) filters.push(`isbn13.in.(${isbns.map(quote).join(",")})`);
+      if (sourceIds.length) filters.push(`source_id.in.(${sourceIds.map(quote).join(",")})`);
+      const params = new URLSearchParams({
+        select: "id,isbn13,source,source_id",
+        or: `(${filters.join(",")})`,
+      });
+      const rows = await this.request(`/rest/v1/books?${params}`) as {
+        id: string;
+        isbn13: string | null;
+        source: string;
+        source_id: string | null;
+      }[];
+      const byIsbn = new Map(rows.filter((r) => r.isbn13).map((r) => [r.isbn13, r.id]));
+      const bySource = new Map(
+        rows.filter((r) => r.source_id).map((r) => [`${r.source}|${r.source_id}`, r.id]),
+      );
+      return plain.map((c) => ({
+        ...c,
+        book_id: (c.isbn13 ? byIsbn.get(c.isbn13) : undefined) ??
+          bySource.get(`${c.source}|${c.source_id}`) ?? null,
+      }));
+    }, plain);
+  }
+
+  readCache(key: string): Promise<BookCandidate[] | null> {
+    if (!this.serviceKey) return Promise.resolve(null);
+    return this.safe("lecture de search_cache", async () => {
+      const since = new Date(Date.now() - CACHE_TTL_MS).toISOString();
+      const params = new URLSearchParams({
+        query_key: `eq.${key}`,
+        created_at: `gte.${since}`,
+        select: "results",
+      });
+      const rows = await this.request(`/rest/v1/search_cache?${params}`, {
+        service: true,
+      }) as { results: BookCandidate[] }[];
+      return rows[0] ? rows[0].results : null;
+    }, null);
+  }
+
+  async writeCache(key: string, results: BookCandidate[]): Promise<void> {
+    if (!this.serviceKey) return;
+    await this.safe("écriture de search_cache", async () => {
+      await this.request("/rest/v1/search_cache", {
+        method: "POST",
+        service: true,
+        prefer: "resolution=merge-duplicates,return=minimal",
+        body: {
+          query_key: key,
+          results: results.map(({ book_id: _ignored, ...c }) => c),
+          created_at: new Date().toISOString(),
+        },
+      });
+    }, undefined);
+  }
+}
+
+function rowToCandidate(row: BookRow): BookCandidate {
+  const { id, ...book } = row;
+  return { book_id: id, ...book };
+}
 
 // verify_jwt laisse passer la clé publishable (rôle anon) : on exige en plus
 // un jeton de session, validé par Supabase Auth.
-async function isSignedInUser(req: Request): Promise<boolean> {
+async function signedInUserToken(req: Request): Promise<string | null> {
   const token = req.headers.get("Authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1];
-  if (!token || token.split(".").length !== 3) return false;
+  if (!token || token.split(".").length !== 3) return null;
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const apikey = req.headers.get("apikey") ?? Deno.env.get("SUPABASE_ANON_KEY");
-  if (!supabaseUrl || !apikey) return false;
+  if (!supabaseUrl || !apikey) return null;
   try {
     const res = await fetch(`${supabaseUrl}/auth/v1/user`, {
       headers: { apikey, Authorization: `Bearer ${token}` },
@@ -115,13 +355,13 @@ async function isSignedInUser(req: Request): Promise<boolean> {
     });
     if (!res.ok) {
       await res.body?.cancel();
-      return false;
+      return null;
     }
     const user = await res.json() as { id?: string; role?: string };
-    return !!user.id && user.role === "authenticated";
+    return user.id && user.role === "authenticated" ? token : null;
   } catch (error) {
     console.warn("search-books: vérification de session impossible", String(error));
-    return false;
+    return null;
   }
 }
 
@@ -152,17 +392,17 @@ function parseInput(body: unknown): SearchInput | { error: string } {
   return { error: "Attendu : { \"query\": \"…\" } ou { \"isbn\": \"…\" }." };
 }
 
-// Chaque source a son propre délai ; une erreur ou un dépassement donne [].
+// Chaque source a son propre délai ; une erreur ou un dépassement donne null.
 async function withSource(
   name: Source,
   run: (signal: AbortSignal) => Promise<BookCandidate[]>,
-): Promise<BookCandidate[]> {
+): Promise<BookCandidate[] | null> {
   const signal = AbortSignal.timeout(SOURCE_TIMEOUT_MS);
   try {
     return await run(signal);
   } catch (error) {
     console.warn(`search-books: source ${name} ignorée`, String(error));
-    return [];
+    return null;
   }
 }
 

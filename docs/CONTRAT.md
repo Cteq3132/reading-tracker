@@ -97,6 +97,7 @@ Réponse : `{ "results": [BookCandidate] }`, 20 résultats au maximum, sans doub
 
 ```json
 {
+  "book_id": "8b65ae35-f7de-44f8-ac36-4984ed882e96",
   "isbn13": "9782070360024", "isbn10": "2070360024",
   "title": "L'Étranger", "subtitle": null,
   "authors": ["Albert Camus"], "publisher": "Gallimard",
@@ -106,6 +107,13 @@ Réponse : `{ "results": [BookCandidate] }`, 20 résultats au maximum, sans doub
   "source": "bnf", "source_id": "ark:/12148/cb35224436w"
 }
 ```
+
+`book_id` (uuid ou `null`) : id de la fiche si le livre est déjà dans `books`. L'app peut alors créer le `user_books` directement ; sinon, elle appelle `upsert_book` avec le candidat. `source` peut aussi valoir `manual` pour une fiche déjà en base.
+
+Cache, pour limiter les appels aux sources externes (et le quota Hardcover partagé) :
+- **ISBN** : la table `books` fait foi. Une fiche complète (titre, auteurs, couverture) est renvoyée sans appeler les sources. Sinon les sources sont interrogées, au plus une fois tous les 30 jours par ISBN, et le résultat est enregistré dans `books` par `upsert_book` : chaque scan peuple le catalogue, et la réponse porte son `book_id`.
+- **Texte** : les résultats sont gardés 30 jours dans la table interne `search_cache`, clé = requête en minuscules sans accents ni ponctuation. Une réponse incomplète (une source en panne) n'est pas mise en cache. Les candidats ne sont pas enregistrés dans `books`.
+- `search_cache` n'est accessible ni à `anon` ni à `authenticated` : seule la fonction la lit et l'écrit, avec la clé service.
 
 Sources, appelées en parallèle et fusionnées par ISBN-13 :
 1. **Google Books** : seulement si le secret `GOOGLE_BOOKS_API_KEY` est défini, car sans clé le quota est de 0. Données les plus riches.

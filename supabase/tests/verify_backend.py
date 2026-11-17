@@ -14,6 +14,7 @@ import json
 import os
 import secrets
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -185,11 +186,21 @@ check("Hardcover répond en texte (« project hail mary »)",
 candidate = yoga[0]
 status, book_id = call("POST", "/rest/v1/rpc/upsert_book", A["token"], {"book": candidate})
 check("upsert_book par A renvoie un uuid", status == 200 and isinstance(book_id, str), show(book_id))
-status, book_id_b = call("POST", "/rest/v1/rpc/upsert_book", B["token"], {"book": {**candidate, "description": "Récit."}})
+status, book_id_b = call("POST", "/rest/v1/rpc/upsert_book", B["token"], {"book": candidate})
 check("upsert_book par B déduplique sur l'ISBN-13 (même id)", book_id_b == book_id, show(book_id_b))
-status, res = call("GET", f"/rest/v1/books?id=eq.{book_id}&select=title,authors,page_count,description,cover_url,source", A["token"])
-print("books:", show(res))
-check("upsert_book complète un champ vide sans écraser", res and res[0]["description"] == "Récit." and res[0]["title"] == "Yoga")
+
+# books est le catalogue partagé (et le cache de search-books) : les écritures
+# de test portent sur une fiche dédiée, jamais sur un vrai livre.
+test_book = {"title": "Fiche de test reading-tracker", "source": "manual", "source_id": "verify-backend",
+             "authors": ["Testeur"]}
+status, test_id = call("POST", "/rest/v1/rpc/upsert_book", A["token"], {"book": test_book})
+status, test_id_b = call("POST", "/rest/v1/rpc/upsert_book", B["token"],
+                         {"book": {**test_book, "title": "Autre titre", "description": "Description de test."}})
+status, res = call("GET", f"/rest/v1/books?id=eq.{test_id}&select=title,description,source,source_id", A["token"])
+print("fiche de test:", show(res))
+check("upsert_book déduplique sur (source, source_id) et complète un champ vide sans écraser le titre",
+      test_id == test_id_b and res and res[0]["title"] == "Fiche de test reading-tracker"
+      and res[0]["description"] == "Description de test.")
 status, res = call("POST", "/rest/v1/rpc/upsert_book", A["token"], {"book": {**candidate, "isbn13": None, "isbn10": "281805138X", "title": "Autre titre"}})
 check("upsert_book retrouve la fiche par l'ISBN-10 converti, sans écraser le titre", res == book_id, show(res))
 if hc_text:
@@ -197,6 +208,27 @@ if hc_text:
     status2, hc_id2 = call("POST", "/rest/v1/rpc/upsert_book", B["token"], {"book": hc_text[0]})
     check("upsert_book accepte une fiche hardcover et la déduplique sur (source, source_id)",
           status == 200 and isinstance(hc_id, str) and hc_id == hc_id2, show([hc_id, hc_id2]))
+# Cache de search-books et book_id
+status, res = call("POST", "/functions/v1/search-books", A["token"], {"isbn": "9782818051382"})
+hit = res.get("results", []) if isinstance(res, dict) else []
+check("ISBN déjà en base : fiche de books renvoyée avec son book_id",
+      len(hit) == 1 and hit[0].get("book_id") == book_id and hit[0]["title"] == "Yoga", show(hit)[:300])
+status, res = call("POST", "/functions/v1/search-books", B["token"], {"query": "yoga carrere"})
+annotated = [r for r in res.get("results", []) if r["isbn13"] == "9782818051382"] if isinstance(res, dict) else []
+check("recherche texte : book_id posé sur un livre déjà en base",
+      all("book_id" in r for r in res.get("results", [])) and (not annotated or annotated[0]["book_id"] == book_id),
+      show(annotated)[:200])
+runs = []
+for q in ("Fred Vargas Pars vite", "fred vargas, pars vite !"):
+    t = time.time()
+    status, res = call("POST", "/functions/v1/search-books", A["token"], {"query": q})
+    runs.append((time.time() - t, [(r["source"], r["source_id"]) for r in res.get("results", [])]))
+print(f"recherche texte : {runs[0][0]:.2f} s puis {runs[1][0]:.2f} s (même clé de cache)")
+check("recherche texte : la variante de ponctuation et de casse renvoie les mêmes résultats (cache)",
+      runs[0][1] and runs[0][1] == runs[1][1])
+status, res = call("GET", "/rest/v1/search_cache?select=query_key&limit=1", A["token"])
+check("search_cache illisible pour un utilisateur", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
+
 status, res = call("POST", "/rest/v1/books", A["token"], {"title": "x", "source": "manual"})
 check("écriture directe dans books refusée", status in (401, 403), f"HTTP {status}")
 status, res = call("POST", "/rest/v1/rpc/upsert_book", None, {"book": candidate})
