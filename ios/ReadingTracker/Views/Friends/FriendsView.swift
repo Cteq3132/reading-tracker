@@ -116,7 +116,7 @@ private struct RequestRow: View {
   }
 }
 
-private struct ActivityRow: View {
+struct ActivityRow: View {
   let activity: FriendActivity
 
   var body: some View {

@@ -55,22 +55,22 @@ struct RootView: View {
 }
 
 enum AppTab: Hashable {
-  case library, add, friends, profile
+  case home, library, friends, profile, add
 }
 
 struct MainTabView: View {
   @Environment(AuthService.self) private var auth
   @Environment(LibraryService.self) private var library
   @Environment(SocialService.self) private var social
-  @State private var selection: AppTab = .library
+  @State private var selection: AppTab = .home
 
   var body: some View {
     TabView(selection: $selection) {
+      Tab("Accueil", systemImage: "house", value: .home) {
+        HomeView(selectedTab: $selection)
+      }
       Tab("Bibliothèque", systemImage: "books.vertical", value: .library) {
         LibraryView(selectedTab: $selection)
-      }
-      Tab("Ajouter", systemImage: "plus.circle", value: .add) {
-        AddBookView()
       }
       Tab("Amis", systemImage: "person.2", value: .friends) {
         FriendsView()
@@ -78,6 +78,10 @@ struct MainTabView: View {
       .badge(social.incoming.count)
       Tab("Profil", systemImage: "person.crop.circle", value: .profile) {
         ProfileView()
+      }
+      // Onglet de recherche iOS 26 : affiché à part dans la tab bar Liquid Glass.
+      Tab("Ajouter", systemImage: "magnifyingglass", value: .add, role: .search) {
+        AddBookView()
       }
     }
     .tabBarMinimizeBehavior(.onScrollDown)

@@ -128,4 +128,4 @@ Ordre de priorité des champs : Google > Hardcover > BnF > Open Library. Toute `
 - SwiftUI, iOS 26 minimum, design Liquid Glass natif. La structure simple d'AudioBooth (github.com/AudioBooth/AudioBooth) sert de référence.
 - Bundle id `app.readingtracker.ios`, nom affiché « reading-tracker » (provisoire).
 - Dépendance : `supabase-swift` (SPM).
-- Onglets : **Bibliothèque** (En cours / PAL / Lus / Abandonnés), **Ajouter** (recherche et scan ISBN), **Amis** (activité, recherche de comptes, demandes), **Profil**.
+- Onglets : **Accueil** (date et salut, lectures en cours avec mise à jour rapide de la page, stats du mois calculées côté client, 3 dernières activités des amis), **Bibliothèque** (En cours / PAL / Lus / Abandonnés), **Amis** (activité, recherche de comptes, demandes), **Profil**. **Ajouter** (recherche et scan ISBN) est l'onglet de recherche iOS 26 (`Tab(role: .search)`), affiché à part dans la tab bar ; l'Accueil y mène aussi.

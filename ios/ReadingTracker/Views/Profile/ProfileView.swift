@@ -108,7 +108,7 @@ struct ProfileView: View {
   }
 }
 
-private struct StatTile: View {
+struct StatTile: View {
   let value: Int
   let label: String
   let systemImage: String

@@ -29,6 +29,16 @@ enum AppConfig {
     #endif
   }()
 
+  /// Variante de la démo pour l'Accueil : `-demo-reading one` (une seule lecture en cours)
+  /// ou `-demo-reading none` (aucune). Par défaut, plusieurs lectures en cours.
+  static let demoReading: String = {
+    #if DEBUG
+    return UserDefaults.standard.string(forKey: "demo-reading") ?? "many"
+    #else
+    return "many"
+    #endif
+  }()
+
   static let demoStartsSignedOut: Bool = {
     #if DEBUG
     return ProcessInfo.processInfo.arguments.contains("-demo-signed-out")

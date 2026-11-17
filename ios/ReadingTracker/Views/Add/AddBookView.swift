@@ -34,7 +34,7 @@ struct AddBookView: View {
       .listStyle(.plain)
       .overlay { overlay }
       .navigationTitle("Ajouter")
-      .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Titre, auteur ou ISBN")
+      .searchable(text: $query, prompt: "Titre, auteur ou ISBN")
       .onSubmit(of: .search) { runSearch(query) }
       .onChange(of: query) { _, value in
         if value.isEmpty {

@@ -66,7 +66,17 @@ enum DemoData {
     book(from: candidates.first { $0.title == title }!)
   }
 
-  static let library: [UserBook] = [
+  /// Bibliothèque de démo, ajustée selon `-demo-reading` pour vérifier les états de l'Accueil.
+  static var library: [UserBook] {
+    let reading = fullLibrary.filter { $0.status == .reading }
+    switch AppConfig.demoReading {
+    case "none": return fullLibrary.filter { $0.status != .reading }
+    case "one": return fullLibrary.filter { $0.status != .reading || $0.id == reading.first?.id }
+    default: return fullLibrary
+    }
+  }
+
+  private static let fullLibrary: [UserBook] = [
     UserBook(userId: me.id, book: book("La Peste"), status: .reading, currentPage: 124, startedAt: day(9),
              updatedAt: timestamp(hoursAgo: 3)),
     UserBook(userId: me.id, book: book("Dune"), status: .reading, currentPage: 612, startedAt: day(30),
@@ -79,7 +89,7 @@ enum DemoData {
     UserBook(userId: me.id, book: book("L'Étranger"), status: .read, startedAt: day(60), finishedAt: day(45),
              rating: 5, review: "Une écriture sèche et lumineuse. À relire.", isFavorite: true,
              updatedAt: timestamp(hoursAgo: 200)),
-    UserBook(userId: me.id, book: book("Le Petit Prince"), status: .read, finishedAt: day(20), rating: 4,
+    UserBook(userId: me.id, book: book("Le Petit Prince"), status: .read, finishedAt: day(2), rating: 4,
              updatedAt: timestamp(hoursAgo: 300)),
     UserBook(userId: me.id, book: book("Madame Bovary"), status: .abandoned, currentPage: 140,
              updatedAt: timestamp(hoursAgo: 400)),

@@ -139,6 +139,19 @@ final class LibraryService {
     return items.filter { $0.status == .read && ($0.finishedAt ?? "").hasPrefix(year) }.count
   }
 
+  var readThisMonth: Int {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "yyyy-MM"
+    let month = f.string(from: .now)
+    return items.filter { $0.status == .read && ($0.finishedAt ?? "").hasPrefix(month) }.count
+  }
+
+  /// Lectures en cours, la plus récemment mise à jour d'abord.
+  var currentlyReading: [UserBook] {
+    items(with: .reading).sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
+  }
+
   var toReadCount: Int { items(with: .toRead).count }
   var readingCount: Int { items(with: .reading).count }
 }
