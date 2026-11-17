@@ -7,11 +7,17 @@ Deux workflows GitHub Actions, dans `.github/workflows/` :
 | `ios-build` | chaque PR, chaque push sur `main` | Résout les paquets SPM (avec cache) et compile l'app pour le simulateur, sans signature. |
 | `testflight` | chaque push sur `main` (donc chaque PR fusionnée), et à la main | Archive l'app, la signe automatiquement avec une clé d'API App Store Connect, puis l'envoie sur App Store Connect, d'où elle part dans TestFlight. |
 
-Les deux tournent sur l'image GitHub `macos-26` (arm64) avec **Xcode 26.6**, épinglé par
-`xcode-select` (SDK iOS 26.5). Leurs étapes communes (Xcode, `Secrets.xcconfig`, paquets SPM)
-sont dans l'action locale `.github/actions/setup-ios`. C'est la dernière image stable : l'image `xcode-27` (Xcode 27.x)
-est encore en préversion publique. Pour changer de version, modifier `xcode-version` dans
-`.github/actions/setup-ios/action.yml`, et `runs-on` dans les deux workflows si l'image change ; la liste des versions installées est dans
+Les deux tournent sur l'image GitHub `xcode-27` (macOS 27, arm64) avec **Xcode 27.2**, épinglé
+par `xcode-select` (SDK iOS 27.2) : la même version qu'en local. Leurs étapes communes (Xcode,
+`Secrets.xcconfig`, paquets SPM) sont dans l'action locale `.github/actions/setup-ios`.
+
+Cette image est encore en **préversion publique**
+([annonce](https://github.com/actions/runner-images/issues/14404)) : files d'attente
+possibles, et son label changera sans doute à son passage en version stable (un job qui
+reste « Queued » indéfiniment en est le signe). Repli possible : l'image stable `macos-26`
+avec Xcode 26.6. Pour changer, modifier `xcode-version` dans
+`.github/actions/setup-ios/action.yml` et `runs-on` dans les deux workflows ; les versions
+installées par image sont dans
 [actions/runner-images](https://github.com/actions/runner-images/tree/main/images/macos).
 Le dépôt étant public, les runners macOS sont gratuits.
 

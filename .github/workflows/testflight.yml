@@ -62,7 +62,7 @@ jobs:
     name: Archiver et envoyer sur TestFlight
     needs: preflight
     if: needs.preflight.outputs.ready == 'true'
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 60
     env:
       BUILD_NUMBER: ${{ github.run_number }}
