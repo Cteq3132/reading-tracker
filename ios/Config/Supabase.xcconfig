@@ -1,0 +1,7 @@
+// Configuration Supabase du client iOS (voir docs/CONTRAT.md).
+// La clé publishable est faite pour être embarquée dans l'app : elle ne donne
+// que les droits accordés par la RLS. Aucune clé secrète ne doit figurer ici.
+//
+// L'hôte est séparé du schéma car « // » ouvre un commentaire dans un .xcconfig.
+SUPABASE_HOST = <project-ref>.supabase.co
+SUPABASE_PUBLISHABLE_KEY = sb_publishable_xxx
