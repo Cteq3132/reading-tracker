@@ -1,10 +1,10 @@
 // Classement de la recherche texte de search-books (docs/CONTRAT.md).
 //
 // Chaque candidat reçoit un score fait de signaux simples, aux poids ci-dessous.
-// Les éditions d'une même œuvre sont d'abord regroupées : on n'en garde qu'une,
-// de préférence française, avec couverture et ISBN, et l'œuvre profite des
-// signaux de toutes ses éditions (genre, popularité, présence dans les deux
-// sources).
+// Les éditions d'une même œuvre sont ensuite regroupées : on garde celle au
+// meilleur score (de préférence française, avec couverture et ISBN), et l'œuvre
+// profite des signaux de toutes ses éditions (genre, popularité, présence dans
+// les deux sources).
 //
 // Module sans dépendance ni syntaxe propre à Deno : il se teste avec Node
 // (supabase/tests/rank_test.ts).
@@ -61,9 +61,12 @@ export interface Hit<C extends Rankable> {
   signals: Signals;
 }
 
-// Minuscules, sans accents, ponctuation remplacée par des espaces.
+// Minuscules, sans accents, ponctuation remplacée par des espaces. Sert aussi
+// de clé à search_cache (index.ts) : la modifier change les clés du cache.
+// « œ » et « æ » ne se décomposent pas en NFKD : on les écrit « oe », « ae ».
 export function fold(s: string): string {
-  return s.toLowerCase().normalize("NFKD").replace(/\p{M}/gu, "")
+  return s.toLowerCase().replace(/œ/g, "oe").replace(/æ/g, "ae")
+    .normalize("NFKD").replace(/\p{M}/gu, "")
     .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }
 
@@ -73,15 +76,11 @@ const STOPWORDS = new Set([
 ]);
 
 // Guides, analyses et résumés scolaires, en français et en anglais (texte replié).
+// Sans ambiguïté : toujours un guide.
 const GUIDE = new RegExp(
   "\\b(" + [
     "fiches? de lecture",
-    "analyses?",
-    "etudes?",
-    "commentaires?",
     "profil d une oeuvre",
-    "resumes?",
-    "bac",
     "dossiers? pedagogiques?",
     "lectures? analytiques?",
     "explications? de texte",
@@ -93,8 +92,17 @@ const GUIDE = new RegExp(
     "cliffsnotes",
   ].join("|") + ")\\b",
 );
-// Catégories Google qui désignent une étude ou un manuel, pas l'œuvre.
+// Ambigus (« Une étude en rouge », « Études de mœurs ») : un guide seulement si
+// aucune source ne classe le livre en fiction.
+const MAYBE_GUIDE = /\b(analyses?|etudes?|commentaires?|resumes?|bac)\b/;
+// Catégories Google qui désignent une étude ou un manuel, pas l'œuvre
+// (« Juvenile Fiction / School & Education » reste de la fiction).
 const GUIDE_CATEGORY = /literary criticism|study aids|education|critique litteraire/;
+
+function isGuideCategory(label: string): boolean {
+  const f = fold(label);
+  return GUIDE_CATEGORY.test(f) && !/\bfiction\b/.test(f);
+}
 const BOX_SET = /\b(coffret|pack|box set|boxed set|integrale|lot de)\b/;
 // Roman ou fiction. « nonfiction » est écarté avant.
 const FICTION = new RegExp(
@@ -107,19 +115,27 @@ const FICTION = new RegExp(
 const NON_FICTION = /\bnon ?fiction\b/;
 
 // « Literary Criticism » ou « Nonfiction » ne comptent pas comme fiction.
+function genreLabels(s: Signals): string[] {
+  return [...(s.categories ?? []), ...(s.genres ?? [])];
+}
+
 function isFiction(labels: string[]): boolean {
   return labels.some((l) => {
     const f = fold(l);
-    return !NON_FICTION.test(f) && !GUIDE_CATEGORY.test(f) && FICTION.test(f);
+    return !NON_FICTION.test(f) && !isGuideCategory(l) && FICTION.test(f);
   });
 }
 
 // Titre replié, sans les mentions d'édition entre parenthèses ou crochets ni
 // l'éditeur collé au titre (« L'Etranger (Collection Folio, 2) (French
-// Edition) Publisher: Gallimard » → « l etranger »).
+// Edition) Publisher: Gallimard » → « l etranger »). Un numéro de tome reste :
+// « (Tome 1) » et « (Tome 2) » sont deux livres.
+const VOLUME = /\b(tome|t|vol|volume|livre|book|part|partie)\b\.?\s*\d|^\s*\d+\s*$/i;
+
 function foldTitle(title: string): string {
   return fold(
-    title.replace(/\([^()]*\)|\[[^\]]*\]/g, " ").replace(/\bpublisher\s*:.*$/i, ""),
+    title.replace(/\(([^()]*)\)|\[([^\]]*)\]/g, (m, a, b) => VOLUME.test(a ?? b) ? m : " ")
+      .replace(/\bpublisher\s*:.*$/i, ""),
   ) || fold(title);
 }
 
@@ -150,13 +166,13 @@ function candidateScore<C extends Rankable>(
   score += W.wordCoverage * (found / query.words.length);
   if (query.words.every((w) => authorWords.has(w))) score += W.authorAllWords;
 
-  const labels = [...(s.categories ?? []), ...(s.genres ?? [])];
-  if (isFiction(labels)) score += W.fiction;
+  const fiction = isFiction(genreLabels(s));
+  if (fiction) score += W.fiction;
 
   // Pas de pénalité si l'on cherche justement une analyse (« analyse l'étranger »).
   const text = fold(`${c.title} ${c.subtitle ?? ""}`);
-  const guide = GUIDE.test(text) ||
-    (s.categories ?? []).some((cat) => GUIDE_CATEGORY.test(fold(cat)));
+  const guide = GUIDE.test(text) || (!fiction && MAYBE_GUIDE.test(text)) ||
+    (s.categories ?? []).some(isGuideCategory);
   if (guide && !query.guide) score += W.guide;
   if (BOX_SET.test(text) || s.compilation) score += W.boxSet;
 
@@ -199,7 +215,7 @@ export function rankText<C extends Rankable>(
   const query = {
     folded,
     words: significant.length ? significant : all,
-    guide: GUIDE.test(folded),
+    guide: GUIDE.test(folded) || MAYBE_GUIDE.test(folded),
   };
 
   type Entry = { hit: Hit<C>; source: TextSource; score: number };
@@ -243,9 +259,9 @@ export function rankText<C extends Rankable>(
     if (new Set(members.map((m) => m.source)).size > 1) score += W.bothSources;
     // Le genre d'une autre édition vaut pour l'œuvre (Hardcover connaît le
     // genre, Google a l'édition française).
-    const labels = signals.flatMap((s) => [...(s.categories ?? []), ...(s.genres ?? [])]);
-    const bestLabels = [...(signals[0].categories ?? []), ...(signals[0].genres ?? [])];
-    if (isFiction(labels) && !isFiction(bestLabels)) score += W.fiction;
+    if (isFiction(signals.flatMap(genreLabels)) && !isFiction(genreLabels(signals[0]))) {
+      score += W.fiction;
+    }
     return { best: members[0].hit.candidate, items: members.map((m) => m.hit.candidate), score };
   }).sort((a, b) => b.score - a.score);
 }
