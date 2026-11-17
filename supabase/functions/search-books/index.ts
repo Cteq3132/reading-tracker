@@ -4,13 +4,14 @@
 // → { "results": BookCandidate[] }, 20 au maximum, sans doublon d'ISBN-13.
 //
 // Sources interrogées en parallèle, chacune avec son propre délai, puis
-// fusionnées par ISBN-13 avec la priorité Google > BnF > Open Library :
+// fusionnées par ISBN-13 avec la priorité Google > Hardcover > BnF > Open Library :
 //   - Google Books, seulement si le secret GOOGLE_BOOKS_API_KEY existe ;
+//   - Hardcover (GraphQL), seulement si le secret HARDCOVER_API_TOKEN existe ;
 //   - BnF SRU en Dublin Core ;
 //   - Open Library.
 // Une source en panne ou trop lente est simplement ignorée.
 
-type Source = "google" | "bnf" | "openlibrary";
+type Source = "google" | "hardcover" | "bnf" | "openlibrary";
 
 interface BookCandidate {
   isbn13: string | null;
@@ -35,7 +36,7 @@ type SearchInput = { kind: "isbn"; isbn13: string; isbn10: string | null } | {
 
 const MAX_RESULTS = 20;
 const SOURCE_TIMEOUT_MS = 6000;
-const PRIORITY: Source[] = ["google", "bnf", "openlibrary"];
+const PRIORITY: Source[] = ["google", "hardcover", "bnf", "openlibrary"];
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -71,14 +72,31 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   const googleKey = Deno.env.get("GOOGLE_BOOKS_API_KEY")?.trim();
+  const hardcoverToken = Deno.env.get("HARDCOVER_API_TOKEN")?.trim();
   const tasks: Promise<BookCandidate[]>[] = [
     googleKey ? withSource("google", (s) => searchGoogle(input, googleKey, s)) : Promise.resolve([]),
+    hardcoverToken
+      ? withSource("hardcover", (s) => searchHardcover(input, hardcoverToken, s))
+      : Promise.resolve([]),
     withSource("bnf", (s) => searchBnf(input, s)),
     withSource("openlibrary", (s) => searchOpenLibrary(input, s)),
   ];
-  const [google, bnf, openlibrary] = await Promise.all(tasks);
+  const [google, hardcover, bnf, openlibrary] = await Promise.all(tasks);
 
-  const results = merge({ google, bnf, openlibrary });
+  // Par ISBN, seul le livre demandé compte : Google renvoie parfois des volumes
+  // sans ISBN ou voisins pour une requête « isbn: ».
+  const keep = (list: BookCandidate[]) =>
+    input.kind === "isbn" ? list.filter((c) => c.isbn13 === input.isbn13) : list;
+  const results = merge({
+    google: keep(google),
+    hardcover: keep(hardcover),
+    bnf: keep(bnf),
+    openlibrary: keep(openlibrary),
+  });
+  console.log(
+    `search-books: ${input.kind} google=${google.length} hardcover=${hardcover.length} ` +
+      `bnf=${bnf.length} openlibrary=${openlibrary.length} → ${results.length}`,
+  );
   return json({ results });
 });
 
@@ -326,6 +344,197 @@ function googleToCandidate(item: GoogleVolume): BookCandidate | null {
     cover_url: cover,
     source: "google",
     source_id: clean(item.id),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Hardcover (GraphQL)
+// ---------------------------------------------------------------------------
+//
+// Doc : github.com/hardcoverapp/hardcover-docs (api/Getting-Started.mdx,
+// api/guides/Searching.mdx). Le jeton est personnel (scope suffisant :
+// read:catalog:search), son quota est partagé par tous les utilisateurs de
+// l'app (60 requêtes/min, 5 000/jour en offre gratuite) : chaque appel ne
+// fait qu'une requête avec un seul champ racine, qui compte pour 1.
+
+const HARDCOVER_URL = "https://api.hardcover.app/v1/graphql";
+
+const HARDCOVER_EDITION_FIELDS = `
+  id isbn_13 isbn_10 title subtitle pages release_date
+  image { url }
+  publisher { name }
+  language { code2 }
+  contributions { contribution author { name } }
+  book {
+    id title subtitle description
+    contributions { contribution author { name } }
+  }
+`;
+
+async function searchHardcover(
+  input: SearchInput,
+  token: string,
+  signal: AbortSignal,
+): Promise<BookCandidate[]> {
+  if (input.kind === "isbn") {
+    const where = input.isbn10
+      ? "{ _or: [{ isbn_13: { _eq: $isbn13 } }, { isbn_10: { _eq: $isbn10 } }] }"
+      : "{ isbn_13: { _eq: $isbn13 } }";
+    const vars = input.isbn10 ? "$isbn13: String!, $isbn10: String!" : "$isbn13: String!";
+    const data = await hardcoverQuery(
+      `query EditionByIsbn(${vars}) {
+        editions(where: ${where}, limit: 5) { ${HARDCOVER_EDITION_FIELDS} }
+      }`,
+      input.isbn10 ? { isbn13: input.isbn13, isbn10: input.isbn10 } : { isbn13: input.isbn13 },
+      token,
+      signal,
+    ) as { editions?: HardcoverEdition[] } | null;
+    return (data?.editions ?? []).flatMap((e) => {
+      const c = hardcoverEditionToCandidate(e);
+      return c ? [c] : [];
+    });
+  }
+
+  const data = await hardcoverQuery(
+    `query SearchBooks($query: String!, $perPage: Int!) {
+      search(query: $query, query_type: "Book", per_page: $perPage, page: 1) { results }
+    }`,
+    { query: input.query, perPage: MAX_RESULTS },
+    token,
+    signal,
+  ) as { search?: { results?: { hits?: { document?: HardcoverSearchDoc }[] } } } | null;
+  return (data?.search?.results?.hits ?? []).flatMap((hit) => {
+    const c = hit.document ? hardcoverDocToCandidate(hit.document) : null;
+    return c ? [c] : [];
+  });
+}
+
+async function hardcoverQuery(
+  query: string,
+  variables: Record<string, unknown>,
+  token: string,
+  signal: AbortSignal,
+): Promise<unknown> {
+  const res = await fetch(HARDCOVER_URL, {
+    method: "POST",
+    signal,
+    headers: {
+      "Content-Type": "application/json",
+      // Le jeton est parfois copié avec son préfixe « Bearer ».
+      authorization: /^bearer\s/i.test(token) ? token : `Bearer ${token}`,
+      "User-Agent": "reading-tracker search-books (Supabase Edge Function)",
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!res.ok) {
+    const remaining = res.headers.get("RateLimit") ?? res.headers.get("X-RateLimit-Remaining");
+    await res.body?.cancel();
+    throw new Error(`HTTP ${res.status} sur api.hardcover.app` + (remaining ? ` (RateLimit ${remaining})` : ""));
+  }
+  const payload = await res.json() as { data?: unknown; errors?: { message?: string }[] };
+  if (payload.errors?.length) {
+    throw new Error(`GraphQL Hardcover : ${payload.errors.map((e) => e.message).join(" ; ")}`);
+  }
+  return payload.data ?? null;
+}
+
+interface HardcoverContribution {
+  contribution?: string | null;
+  author?: { name?: string } | null;
+}
+
+interface HardcoverEdition {
+  id?: number;
+  isbn_13?: string | null;
+  isbn_10?: string | null;
+  title?: string | null;
+  subtitle?: string | null;
+  pages?: number | null;
+  release_date?: string | null;
+  image?: { url?: string | null } | null;
+  publisher?: { name?: string | null } | null;
+  language?: { code2?: string | null } | null;
+  contributions?: HardcoverContribution[];
+  book?: {
+    id?: number;
+    title?: string | null;
+    subtitle?: string | null;
+    description?: string | null;
+    contributions?: HardcoverContribution[];
+  } | null;
+}
+
+interface HardcoverSearchDoc {
+  id?: number | string;
+  title?: string;
+  subtitle?: string | null;
+  author_names?: string[];
+  contributions?: HardcoverContribution[];
+  description?: string | null;
+  pages?: number | null;
+  release_year?: number | null;
+  image?: { url?: string | null } | null;
+}
+
+// Auteurs seulement : une contribution vide ou « Author » (pas les traducteurs,
+// illustrateurs…).
+function hardcoverAuthors(contributions: HardcoverContribution[] | undefined): string[] {
+  return (contributions ?? [])
+    .filter((c) => !c.contribution || /^author$/i.test(c.contribution))
+    .map((c) => clean(c.author?.name))
+    .filter((a): a is string => !!a);
+}
+
+function hardcoverEditionToCandidate(e: HardcoverEdition): BookCandidate | null {
+  const title = clean(e.title) ?? clean(e.book?.title);
+  if (!title) return null;
+  const ids = pickIsbns([e.isbn_13 ?? "", e.isbn_10 ?? ""]);
+  const authors = hardcoverAuthors(e.contributions);
+  const language = toIso6391(e.language?.code2);
+  return {
+    isbn13: ids.isbn13,
+    isbn10: ids.isbn10,
+    title,
+    // Pas de repli sur le sous-titre de l'œuvre : il vient souvent d'une autre
+    // langue (L'Étranger : « The Original Unabridged and Complete Edition »).
+    subtitle: clean(e.subtitle),
+    authors: authors.length ? authors : hardcoverAuthors(e.book?.contributions),
+    publisher: clean(e.publisher?.name),
+    published_date: clean(e.release_date),
+    page_count: typeof e.pages === "number" && e.pages > 0 ? e.pages : null,
+    // La description appartient à l'œuvre, pas à l'édition, et sa langue varie
+    // (Yoga, édition POL : description en portugais). On ne la garde que pour
+    // une édition anglaise, langue habituelle des fiches Hardcover.
+    description: language === "en" ? clean(e.book?.description) : null,
+    language,
+    cover_url: toHttps(e.image?.url),
+    source: "hardcover",
+    source_id: e.id ? `edition:${e.id}` : null,
+  };
+}
+
+// Un résultat de recherche est une œuvre, pas une édition : ses ISBN mélangent
+// toutes les éditions, on n'en retient donc aucun.
+function hardcoverDocToCandidate(d: HardcoverSearchDoc): BookCandidate | null {
+  const title = clean(d.title);
+  if (!title) return null;
+  const authors = hardcoverAuthors(d.contributions);
+  return {
+    isbn13: null,
+    isbn10: null,
+    title,
+    subtitle: clean(d.subtitle),
+    authors: authors.length
+      ? authors
+      : (d.author_names ?? []).map(clean).filter((a): a is string => !!a),
+    publisher: null,
+    published_date: d.release_year ? String(d.release_year) : null,
+    page_count: typeof d.pages === "number" && d.pages > 0 ? d.pages : null,
+    description: clean(d.description),
+    language: null,
+    cover_url: toHttps(d.image?.url),
+    source: "hardcover",
+    source_id: d.id !== undefined && d.id !== null ? `book:${d.id}` : null,
   };
 }
 
@@ -598,11 +807,11 @@ async function openLibraryByQuery(query: string, signal: AbortSignal): Promise<B
 // ---------------------------------------------------------------------------
 
 // Fusionne par ISBN-13. Pour chaque champ, la première source non vide dans
-// l'ordre Google > BnF > Open Library l'emporte. L'ordre des résultats suit le
-// meilleur rang obtenu dans l'une des sources ; à rang égal, la pertinence de
-// Google puis d'Open Library passe avant celle de la BnF, plus faible en texte
-// libre (elle classe les études critiques avant l'œuvre).
-const RANKING: Record<Source, number> = { google: 0, openlibrary: 1, bnf: 2 };
+// l'ordre Google > Hardcover > BnF > Open Library l'emporte. L'ordre des
+// résultats suit le meilleur rang obtenu dans l'une des sources ; à rang égal,
+// la pertinence de Google, Hardcover puis Open Library passe avant celle de la
+// BnF, plus faible en texte libre (elle classe les études critiques avant l'œuvre).
+const RANKING: Record<Source, number> = { google: 0, hardcover: 1, openlibrary: 2, bnf: 3 };
 
 function merge(bySource: Record<Source, BookCandidate[]>): BookCandidate[] {
   type Group = { rank: number; priority: number; items: BookCandidate[] };

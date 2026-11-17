@@ -159,6 +159,28 @@ camus = search[json.dumps({"query": "camus etranger"})]
 check("« camus etranger » → L'Étranger d'Albert Camus parmi les premiers résultats",
       any("tranger" in r["title"] and "Albert Camus" in r["authors"] for r in camus[:3]))
 
+# Sources optionnelles (secrets GOOGLE_BOOKS_API_KEY et HARDCOVER_API_TOKEN).
+check("Google Books répond (résultats source google)",
+      any(r["source"] == "google" for rs in search.values() for r in rs))
+extra = {}
+for body in ({"isbn": "9782070360024"}, {"query": "project hail mary"}):
+    status, res = call("POST", "/functions/v1/search-books", A["token"], body)
+    extra[json.dumps(body)] = res.get("results", []) if isinstance(res, dict) else []
+    print(f"search-books {show(body)} → HTTP {status}, sources :",
+          sorted({r["source"] for r in extra[json.dumps(body)]}))
+etranger = extra[json.dumps({"isbn": "9782070360024"})]
+check("recherche ISBN : uniquement le livre demandé",
+      bool(etranger) and all(r["isbn13"] == "9782070360024" for r in etranger)
+      and all(r["isbn13"] == "9782818051382" for r in yoga), show(etranger)[:300])
+hc_isbn = [r for r in etranger if r["source"] == "hardcover"]
+check("Hardcover répond par ISBN (édition hardcover, couverture https)",
+      bool(hc_isbn) and hc_isbn[0]["source_id"].startswith("edition:")
+      and hc_isbn[0]["cover_url"].startswith("https://"), show(hc_isbn)[:300])
+hc_text = [r for r in extra[json.dumps({"query": "project hail mary"})] if r["source"] == "hardcover"]
+check("Hardcover répond en texte (« project hail mary »)",
+      bool(hc_text) and hc_text[0]["source_id"].startswith("book:") and "Andy Weir" in hc_text[0]["authors"],
+      show(hc_text[:1])[:300])
+
 # 4. upsert_book --------------------------------------------------------------
 candidate = yoga[0]
 status, book_id = call("POST", "/rest/v1/rpc/upsert_book", A["token"], {"book": candidate})
@@ -170,6 +192,11 @@ print("books:", show(res))
 check("upsert_book complète un champ vide sans écraser", res and res[0]["description"] == "Récit." and res[0]["title"] == "Yoga")
 status, res = call("POST", "/rest/v1/rpc/upsert_book", A["token"], {"book": {**candidate, "isbn13": None, "isbn10": "281805138X", "title": "Autre titre"}})
 check("upsert_book retrouve la fiche par l'ISBN-10 converti, sans écraser le titre", res == book_id, show(res))
+if hc_text:
+    status, hc_id = call("POST", "/rest/v1/rpc/upsert_book", A["token"], {"book": hc_text[0]})
+    status2, hc_id2 = call("POST", "/rest/v1/rpc/upsert_book", B["token"], {"book": hc_text[0]})
+    check("upsert_book accepte une fiche hardcover et la déduplique sur (source, source_id)",
+          status == 200 and isinstance(hc_id, str) and hc_id == hc_id2, show([hc_id, hc_id2]))
 status, res = call("POST", "/rest/v1/books", A["token"], {"title": "x", "source": "manual"})
 check("écriture directe dans books refusée", status in (401, 403), f"HTTP {status}")
 status, res = call("POST", "/rest/v1/rpc/upsert_book", None, {"book": candidate})

@@ -45,7 +45,7 @@ RLS : lecture pour tout utilisateur connecté ; mise à jour de sa propre ligne 
 | description | text | |
 | language | text | ISO 639-1 si possible |
 | cover_url | text | https |
-| source | text not null | `google` \| `bnf` \| `openlibrary` \| `manual` |
+| source | text not null | `google` \| `hardcover` \| `bnf` \| `openlibrary` \| `manual` |
 | source_id | text | unique avec `source` |
 | created_at | timestamptz | |
 
@@ -109,11 +109,11 @@ Réponse : `{ "results": [BookCandidate] }`, 20 résultats au maximum, sans doub
 
 Sources, appelées en parallèle et fusionnées par ISBN-13 :
 1. **Google Books** : seulement si le secret `GOOGLE_BOOKS_API_KEY` est défini, car sans clé le quota est de 0. Données les plus riches.
-2. **BnF SRU** (`catalogue.bnf.fr/api/SRU`, `recordSchema=dublincore`, sans auth) : ISBN via `bib.isbn adj "<isbn>"` (essayer ISBN-13 puis ISBN-10), texte via `bib.anywhere all "<q>"`. On ne garde que `dc:type` « texte imprimé ». Il faut nettoyer : le titre (couper à « / »), les auteurs (« Camus, Albert (1913-1960). Auteur du texte » → « Albert Camus »), l'éditeur (retirer « (Paris) »), le nombre de pages tiré de `dc:format`, et l'ISBN tiré de `dc:identifier` « ISBN … ».
-3. **Open Library** : `search.json` pour le texte, `/isbn/<isbn>.json` pour l'ISBN. Sert aussi de couverture de secours : `https://covers.openlibrary.org/b/isbn/<isbn13>-L.jpg?default=false`.
+2. **Hardcover** (GraphQL, `https://api.hardcover.app/v1/graphql`, header `authorization: Bearer <jeton>`) : seulement si le secret `HARDCOVER_API_TOKEN` est défini. ISBN via `editions(where: isbn_13 / isbn_10)`, texte via `search(query_type: "Book")`. Un résultat texte est une œuvre : il ne porte pas d'ISBN, et son `source_id` vaut `book:<id>` (`edition:<id>` pour une recherche par ISBN). Le jeton est personnel, avec un quota partagé par tous les utilisateurs de l'app (offre gratuite : 60 requêtes/min, 5 000/jour), une expiration choisie à sa création et une réinitialisation possible sans préavis tant que l'API est en bêta. Scope suffisant : `read:catalog:search`.
+3. **BnF SRU** (`catalogue.bnf.fr/api/SRU`, `recordSchema=dublincore`, sans auth) : ISBN via `bib.isbn adj "<isbn>"` (essayer ISBN-13 puis ISBN-10), texte via `bib.anywhere all "<q>"`. On ne garde que `dc:type` « texte imprimé ». Il faut nettoyer : le titre (couper à « / »), les auteurs (« Camus, Albert (1913-1960). Auteur du texte » → « Albert Camus »), l'éditeur (retirer « (Paris) »), le nombre de pages tiré de `dc:format`, et l'ISBN tiré de `dc:identifier` « ISBN … ».
+4. **Open Library** : `search.json` pour le texte, `/isbn/<isbn>.json` pour l'ISBN. Sert aussi de couverture de secours : `https://covers.openlibrary.org/b/isbn/<isbn13>-L.jpg?default=false`.
 
-Ordre de priorité des champs : Google > BnF > Open Library. Toute `cover_url` est en https.
-Hardcover : hors v1 (son API demande un jeton lié à un compte et n'est pas prévue pour une app distribuée).
+Ordre de priorité des champs : Google > Hardcover > BnF > Open Library. Toute `cover_url` est en https.
 
 ## App iOS
 
