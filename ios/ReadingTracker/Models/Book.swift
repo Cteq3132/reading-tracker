@@ -113,6 +113,26 @@ struct BookCandidate: Codable, Hashable, Identifiable, Sendable {
 }
 
 extension BookCandidate {
+  private static let french = Locale(identifier: "fr_FR")
+
+  /// Langue en toutes lettres : « fr » → « Français ».
+  var languageName: String? {
+    guard let language, !language.isEmpty else { return nil }
+    return Self.french.localizedString(forLanguageCode: language)?.capitalized(with: Self.french)
+  }
+
+  /// « 1985-03-12 » → « 12 mars 1985 », « 2021-03 » → « mars 2021 », une année seule telle quelle.
+  var formattedPublishedDate: String? {
+    guard let raw = publishedDate, !raw.isEmpty else { return nil }
+    if raw.count >= 10, let date = PostgresDate.date(fromDay: String(raw.prefix(10))) {
+      return date.formatted(.dateTime.day().month(.wide).year().locale(Self.french))
+    }
+    if raw.count == 7, let date = PostgresDate.date(fromDay: raw + "-01") {
+      return date.formatted(.dateTime.month(.wide).year().locale(Self.french))
+    }
+    return raw
+  }
+
   /// Champs utiles à la page de détail encore vides (le sous-titre et l'ISBN-10 manquent souvent
   /// pour de bon, ils ne comptent pas) : une recherche par ISBN peut les compléter.
   var isMissingDetails: Bool {

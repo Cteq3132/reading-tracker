@@ -10,7 +10,11 @@ struct CandidateDetailView: View {
 
   /// Le candidat, complété au besoin par une recherche par ISBN à l'ouverture.
   @State private var candidate: BookCandidate
-  @State private var completion: Task<Void, Never>?
+  /// Prévient la liste de résultats quand le candidat a été complété : la ligne affiche alors la
+  /// même couverture que la page, et le zoom du retour ne saute pas d'une image à l'autre.
+  private let onCompleted: (BookCandidate) -> Void
+  /// Recherche par ISBN déjà lancée pour cette ouverture de la page.
+  @State private var didRequestDetails = false
   @State private var isCompleting = false
   @State private var isAdding = false
   /// Ajouté depuis cette page (pour dire « Ajouté à l'instant » plutôt que « Déjà dans… »).
@@ -18,8 +22,9 @@ struct CandidateDetailView: View {
   @State private var errorMessage: String?
   @State private var showsNavigationTitle = false
 
-  init(candidate: BookCandidate) {
+  init(candidate: BookCandidate, onCompleted: @escaping (BookCandidate) -> Void = { _ in }) {
     _candidate = State(initialValue: candidate)
+    self.onCompleted = onCompleted
   }
 
   private var existing: UserBook? { library.existing(for: candidate) }
@@ -45,7 +50,7 @@ struct CandidateDetailView: View {
     .navigationTitle(showsNavigationTitle ? candidate.title : "")
     .navigationBarTitleDisplayMode(.inline)
     .errorAlert($errorMessage)
-    .sensoryFeedback(.success, trigger: existing?.status) { old, new in old == nil && new != nil }
+    .sensoryFeedback(.success, trigger: addedHere) { _, added in added }
     .onAppear(perform: completeIfNeeded)
   }
 
@@ -100,7 +105,6 @@ struct CandidateDetailView: View {
 
   // MARK: Action principale
 
-  @ViewBuilder
   private var primaryAction: some View {
     Group {
       if let existing {
@@ -174,7 +178,7 @@ struct CandidateDetailView: View {
       facts.append(.init(caption: "Parution", value: year, detail: candidate.publisher ?? ""))
     }
     if let code = candidate.language, !code.isEmpty {
-      facts.append(.init(caption: "Langue", value: code.uppercased(), detail: Self.languageName(code) ?? ""))
+      facts.append(.init(caption: "Langue", value: code.uppercased(), detail: candidate.languageName ?? ""))
     }
     return facts
   }
@@ -183,9 +187,9 @@ struct CandidateDetailView: View {
   private var information: some View {
     let rows: [(String, String)] = [
       ("Éditeur", candidate.publisher),
-      ("Parution", Self.formattedDate(candidate.publishedDate)),
+      ("Parution", candidate.formattedPublishedDate),
       ("Pages", candidate.pageCount.map { "\($0)" }),
-      ("Langue", candidate.language.flatMap { Self.languageName($0) ?? $0 }),
+      ("Langue", candidate.languageName ?? candidate.language),
       ("ISBN-13", candidate.isbn13),
       ("ISBN-10", candidate.isbn10),
     ].compactMap { label, value in
@@ -210,24 +214,6 @@ struct CandidateDetailView: View {
     }
   }
 
-  static func languageName(_ code: String) -> String? {
-    let french = Locale(identifier: "fr_FR")
-    return french.localizedString(forLanguageCode: code)?.capitalized(with: french)
-  }
-
-  /// « 1985-03-12 » → « 12 mars 1985 », « 2021-03 » → « mars 2021 », une année seule telle quelle.
-  static func formattedDate(_ raw: String?) -> String? {
-    guard let raw, !raw.isEmpty else { return nil }
-    let french = Locale(identifier: "fr_FR")
-    if raw.count >= 10, let date = PostgresDate.date(fromDay: String(raw.prefix(10))) {
-      return date.formatted(.dateTime.day().month(.wide).year().locale(french))
-    }
-    if raw.count == 7, let date = PostgresDate.date(fromDay: raw + "-01") {
-      return date.formatted(.dateTime.month(.wide).year().locale(french))
-    }
-    return raw
-  }
-
   // MARK: Complément par ISBN
 
   /// Si des champs manquent et que le candidat a un ISBN-13, une recherche par ISBN (servie par
@@ -235,14 +221,17 @@ struct CandidateDetailView: View {
   /// ouverture de la page : la tâche n'est pas annulée quand une autre page passe par-dessus.
   /// Un échec, une limite de débit (429) compris, laisse la page telle quelle, sans alerte.
   private func completeIfNeeded() {
-    guard completion == nil, candidate.isMissingDetails, let isbn = candidate.isbn13 else { return }
+    guard !didRequestDetails, candidate.isMissingDetails, let isbn = candidate.isbn13 else { return }
+    didRequestDetails = true
     isCompleting = true
-    completion = Task {
+    Task {
       defer { isCompleting = false }
       guard let results = try? await search.search(isbn: isbn),
             let match = results.first(where: { $0.isbn13 == isbn })
       else { return }
-      withAnimation(.smooth) { candidate = candidate.completed(with: match) }
+      let completed = candidate.completed(with: match)
+      withAnimation(.smooth) { candidate = completed }
+      onCompleted(completed)
     }
   }
 }
@@ -315,7 +304,7 @@ private struct ExistingStatusCard: View {
         .foregroundStyle(.tint)
         .frame(width: 28)
       VStack(alignment: .leading, spacing: 2) {
-        Text(Self.phrase(item.status))
+        Text(item.status.inLibraryPhrase)
           .font(.headline)
         Text(addedHere ? "Ajouté à l'instant" : "Déjà dans ta bibliothèque")
           .font(.footnote)
@@ -333,17 +322,6 @@ private struct ExistingStatusCard: View {
     .padding(.vertical, 12)
     .glassEffect(.regular, in: .rect(cornerRadius: 22))
     .accessibilityElement(children: .contain)
-  }
-
-  static func phrase(_ status: ReadingStatus) -> String {
-    switch status {
-    case .toRead: "Dans ta PAL"
-    case .wishlist: "Dans tes envies"
-    case .reading: "En cours de lecture"
-    case .read: "Lu"
-    case .abandoned: "Abandonné"
-    case .released: "Libéré"
-    }
   }
 }
 

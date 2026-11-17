@@ -50,6 +50,18 @@ enum ReadingStatus: String, Codable, CaseIterable, Identifiable, Sendable {
     }
   }
 
+  /// Statut d'un livre de la bibliothèque, en toutes lettres (page de détail d'un résultat).
+  var inLibraryPhrase: String {
+    switch self {
+    case .toRead: "Dans ta PAL"
+    case .wishlist: "Dans tes envies"
+    case .reading: "En cours de lecture"
+    case .read: "Lu"
+    case .abandoned: "Abandonné"
+    case .released: "Libéré"
+    }
+  }
+
   var systemImage: String {
     switch self {
     case .wishlist: "gift"
