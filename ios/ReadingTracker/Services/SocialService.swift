@@ -19,6 +19,11 @@ final class SocialService {
   // Données de démo modifiables pendant la session.
   private var demoProfiles = DemoData.profiles
 
+  /// Comptes que je suis et qui ont accepté.
+  var acceptedFollowingIds: [UUID] {
+    outgoing.filter { $0.value == .accepted }.map(\.key)
+  }
+
   func refresh(userId: UUID) async {
     if AppConfig.isDemo {
       if !hasLoaded {

@@ -82,13 +82,28 @@ enum PALLedger {
 
 // MARK: Objectif
 
-/// Objectif PAL du profil. Progression = (taille de départ − taille actuelle) / (départ − cible), bornée à [0, 1].
-struct PALGoal: Equatable, Sendable {
+/// Ligne de `pal_goals` : l'objectif PAL, visible de son seul propriétaire. Pas de ligne = pas d'objectif.
+/// Progression = (taille de départ − taille actuelle) / (départ − cible), bornée à [0, 1].
+struct PALGoal: Codable, Equatable, Sendable {
   var target: Int
   /// Échéance facultative, jour `yyyy-MM-dd`.
   var deadline: String?
-  /// Taille de la PAL quand l'objectif a été fixé (posée par trigger).
+  /// Taille de la PAL et instant où l'objectif a été fixé : posés par trigger, jamais envoyés.
   var startSize: Int?
+  var setAt: String?
+
+  enum CodingKeys: String, CodingKey {
+    case target, deadline
+    case startSize = "start_size"
+    case setAt = "set_at"
+  }
+
+  init(target: Int, deadline: String? = nil, startSize: Int? = nil, setAt: String? = nil) {
+    self.target = target
+    self.deadline = deadline
+    self.startSize = startSize
+    self.setAt = setAt
+  }
 
   func progress(currentSize: Int) -> Double {
     if currentSize <= target { return 1 }
@@ -100,6 +115,19 @@ struct PALGoal: Equatable, Sendable {
   func remaining(currentSize: Int) -> Int { max(currentSize - target, 0) }
 
   func isReached(currentSize: Int) -> Bool { currentSize <= target }
+}
+
+/// Écriture de `pal_goals` (upsert sur `user_id`, posé par défaut à `auth.uid()`) : seulement la cible et
+/// l'échéance. `nil` part en `null` pour effacer l'échéance.
+struct PALGoalUpsert: Encodable, Sendable {
+  var target: Int
+  var deadline: String?
+
+  func encode(to encoder: Encoder) throws {
+    var c = encoder.container(keyedBy: PALGoal.CodingKeys.self)
+    try c.encode(target, forKey: .target)
+    try c.encode(deadline, forKey: .deadline)
+  }
 }
 
 // MARK: Ancienneté et ordres de la PAL

@@ -14,6 +14,7 @@ struct HomeView: View {
   @State private var showsGoal = false
 
   var body: some View {
+    @Bindable var pal = pal
     NavigationStack {
       ScrollView {
         VStack(alignment: .leading, spacing: 32) {
@@ -49,8 +50,9 @@ struct HomeView: View {
         DrawSheet()
       }
       .sheet(isPresented: $showsGoal) {
-        PALGoalSheet(currentSize: library.toReadCount, goal: auth.profile?.palGoal)
+        PALGoalSheet(currentSize: library.toReadCount, goal: pal.goal)
       }
+      .errorAlert($pal.errorMessage)
     }
   }
 
@@ -84,7 +86,7 @@ struct HomeView: View {
       PALCard(
         size: library.toReadCount,
         balance: pal.monthBalance(),
-        goal: auth.profile?.palGoal,
+        goal: pal.goal,
         onDraw: { showsDraw = true },
         onSetGoal: { showsGoal = true },
         onAdd: { selectedTab = .add }
@@ -174,8 +176,9 @@ struct HomeView: View {
           .padding(.trailing, 20)
       }
 
-      let recent = Array(social.activity.prefix(3))
+      // Trois lignes au plus, dont les progrès de PAL des amis.
       let palMoves = friendPALMoves
+      let recent = Array(social.activity.prefix(3 - palMoves.count))
       Group {
         if recent.isEmpty && palMoves.isEmpty {
           HStack(spacing: 12) {

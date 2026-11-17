@@ -5,6 +5,7 @@ struct ProfileView: View {
   @Environment(AuthService.self) private var auth
   @Environment(LibraryService.self) private var library
   @Environment(SocialService.self) private var social
+  @Environment(PALService.self) private var pal
 
   @State private var confirmSignOut = false
   @State private var showsGoal = false
@@ -69,7 +70,7 @@ struct ProfileView: View {
       .navigationBarTitleDisplayMode(.inline)
       .errorAlert($errorMessage)
       .sheet(isPresented: $showsGoal) {
-        PALGoalSheet(currentSize: library.toReadCount, goal: auth.profile?.palGoal)
+        PALGoalSheet(currentSize: library.toReadCount, goal: pal.goal)
       }
     }
   }
@@ -79,27 +80,16 @@ struct ProfileView: View {
   @ViewBuilder
   private var goalSection: some View {
     Section {
-      if let goal = auth.profile?.palGoal {
+      if let goal = pal.goal {
         let size = library.toReadCount
-        let progress = goal.progress(currentSize: size)
-        VStack(alignment: .leading, spacing: 8) {
-          HStack(alignment: .firstTextBaseline) {
-            Text("\(goal.target) livre\(goal.target > 1 ? "s" : "") visé\(goal.target > 1 ? "s" : "")")
-              .font(.headline)
-            Spacer()
-            Text("\(Int((progress * 100).rounded())) %")
-              .font(.subheadline.weight(.semibold))
-              .monospacedDigit()
-              .foregroundStyle(.tint)
-          }
-          ReadingProgressBar(progress: progress)
-          let left = goal.remaining(currentSize: size)
-          Text("Ta PAL compte \(size) livre\(size > 1 ? "s" : "") · \(left == 0 ? "objectif atteint" : "encore \(left) à sortir")")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
+        let left = goal.remaining(currentSize: size)
+        PALGoalProgress(
+          title: "\(goal.target) livre\(goal.target > 1 ? "s" : "") visé\(goal.target > 1 ? "s" : "")",
+          caption: "Ta PAL compte \(size) livre\(size > 1 ? "s" : "") · \(left == 0 ? "objectif atteint" : "encore \(left) à sortir")",
+          progress: goal.progress(currentSize: size),
+          titleFont: .headline
+        )
         .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
 
         LabeledContent("Échéance", value: PostgresDate.long(goal.deadline) ?? "Aucune")
 
@@ -117,7 +107,7 @@ struct ProfileView: View {
     } header: {
       Text("Objectif PAL")
     } footer: {
-      if auth.profile?.palGoal == nil {
+      if pal.goal == nil {
         Text("Choisis la taille de PAL que tu vises, avec ou sans échéance.")
       }
     }
@@ -125,7 +115,8 @@ struct ProfileView: View {
 
   private func removeGoal() async {
     do {
-      try await auth.setPALGoal(target: nil, deadline: nil, currentSize: library.toReadCount)
+      guard let userId = auth.userId else { return }
+      try await pal.removeGoal(userId: userId)
     } catch {
       errorMessage = ErrorMessage.from(error)
     }

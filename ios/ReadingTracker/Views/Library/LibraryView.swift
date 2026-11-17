@@ -9,13 +9,7 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
   /// Libellé du segment. « Abandonnés et libérés » ne tient pas dans cinq segments : le dernier
   /// s'appelle « Libérés » et sa grille sépare les deux statuts en sections.
   var label: String {
-    switch self {
-    case .reading: "En cours"
-    case .toRead: "PAL"
-    case .wishlist: "Envies"
-    case .read: "Lus"
-    case .closed: "Libérés"
-    }
+    self == .closed ? ReadingStatus.released.label : statuses[0].label
   }
 
   var statuses: [ReadingStatus] {
@@ -133,7 +127,7 @@ struct LibraryView: View {
       VStack(alignment: .leading, spacing: 28) {
         ForEach(filter.statuses, id: \.self) { status in
           // Le dernier sorti d'abord.
-          let items = library.items(with: status).sorted { (PostgresDate.parse($0.statusChangedAt) ?? .distantPast) > (PostgresDate.parse($1.statusChangedAt) ?? .distantPast) }
+          let items = library.items(with: status).sorted { ($0.statusChangedDate ?? .distantPast) > ($1.statusChangedDate ?? .distantPast) }
           if !items.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
               Text(status.label)
