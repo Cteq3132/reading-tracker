@@ -7,7 +7,7 @@ description: Sélectionne Xcode, génère Secrets.xcconfig et résout les paquet
 inputs:
   xcode-version:
     description: Version d'Xcode installée sur l'image (/Applications/Xcode_<version>.app).
-    default: "26.6"
+    default: "27.2"
   supabase-host:
     description: Secret SUPABASE_HOST.
     required: true
