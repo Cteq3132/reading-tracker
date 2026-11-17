@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Fiche d'un livre de la bibliothèque : statut, page actuelle, note, avis, favori, suppression.
+/// Fiche d'un livre de la bibliothèque : statut, dates de lecture, page actuelle, note, avis, favori, suppression.
 struct BookDetailView: View {
   let userBookId: UUID
 
@@ -40,19 +40,39 @@ struct BookDetailView: View {
       .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 8, trailing: 0))
 
       if let draft = Binding($draft) {
-        Section("Lecture") {
+        Section {
           Picker("Statut", selection: draft.status) {
             ForEach(ReadingStatus.allCases) { status in
               Label(status.singularLabel, systemImage: status.systemImage).tag(status)
             }
           }
           .pickerStyle(.menu)
-
-          if let started = PostgresDate.long(item.startedAt) {
-            LabeledContent("Commencé le", value: started)
+          .onChange(of: draft.wrappedValue.status) { _, status in
+            draft.wrappedValue.setStatus(status, from: item, today: PostgresDate.today())
           }
-          if item.status == .read, let finished = PostgresDate.long(item.finishedAt) {
-            LabeledContent("Terminé le", value: finished)
+
+          if draft.wrappedValue.showsStartDate {
+            ReadingDateRow(
+              title: "Commencé le",
+              day: draft.startedAt,
+              canClear: draft.wrappedValue.canClearStartDate,
+              // Pour un livre lu, proposer la date de fin plutôt qu'aujourd'hui évite une fin avant le début.
+              suggestion: draft.wrappedValue.showsFinishDate ? draft.wrappedValue.finishedAt : nil
+            )
+          }
+          if draft.wrappedValue.showsFinishDate {
+            ReadingDateRow(
+              title: "Terminé le",
+              day: draft.finishedAt,
+              canClear: draft.wrappedValue.canClearFinishDate
+            )
+          }
+        } header: {
+          Text("Lecture")
+        } footer: {
+          if let problem = dateProblem {
+            Label(problem, systemImage: "exclamationmark.triangle.fill")
+              .foregroundStyle(.red)
           }
         }
 
@@ -145,7 +165,7 @@ struct BookDetailView: View {
           if isSaving { ProgressView() } else { Text("Enregistrer") }
         }
         .buttonStyle(.glassProminent)
-        .disabled(!hasChanges || isSaving)
+        .disabled(!hasChanges || isSaving || dateProblem != nil)
       }
       ToolbarItemGroup(placement: .keyboard) {
         Spacer()
@@ -190,6 +210,10 @@ struct BookDetailView: View {
       .joined(separator: " · ")
   }
 
+  private var dateProblem: String? {
+    draft?.dateProblem(today: PostgresDate.today())
+  }
+
   private var hasChanges: Bool {
     guard let item, let draft else { return false }
     var normalized = draft
@@ -204,7 +228,7 @@ struct BookDetailView: View {
   }
 
   private func save() async {
-    guard let draft else { return }
+    guard let draft, draft.dateProblem(today: PostgresDate.today()) == nil else { return }
     isSaving = true
     defer { isSaving = false }
     focusedField = nil
@@ -226,6 +250,52 @@ struct BookDetailView: View {
       dismiss()
     } catch {
       errorMessage = ErrorMessage.from(error)
+    }
+  }
+}
+
+/// Date de lecture de la fiche : sélecteur de date natif (compact) quand elle est renseignée,
+/// bouton « Ajouter » sinon, et bouton d'effacement quand la date peut rester vide.
+private struct ReadingDateRow: View {
+  let title: String
+  @Binding var day: String?
+  let canClear: Bool
+  /// Jour proposé par « Ajouter » ; aujourd'hui par défaut.
+  var suggestion: String? = nil
+
+  private static let french = Locale(identifier: "fr_FR")
+
+  var body: some View {
+    if let current = day.flatMap({ PostgresDate.date(fromDay: $0) }) {
+      LabeledContent(title) {
+        HStack(spacing: 10) {
+          // Le bouton d'effacement passe avant la date, pour que les dates restent alignées à droite.
+          if canClear {
+            Button {
+              day = nil
+            } label: {
+              // Même gris que le bouton d'effacement d'un champ texte.
+              Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(Color(.systemGray3))
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Effacer la date : \(title.lowercased())")
+          }
+          DatePicker(
+            title,
+            selection: Binding(get: { current }, set: { day = PostgresDate.day(from: $0) }),
+            in: ...Date.now,
+            displayedComponents: .date
+          )
+          .labelsHidden()
+          .environment(\.locale, Self.french)
+        }
+      }
+    } else {
+      LabeledContent(title) {
+        Button("Ajouter") { day = suggestion ?? PostgresDate.today() }
+          .buttonStyle(.borderless)
+      }
     }
   }
 }

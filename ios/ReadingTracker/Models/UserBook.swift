@@ -117,6 +117,9 @@ struct UserBook: Codable, Identifiable, Hashable, Sendable {
 struct UserBookUpdate: Encodable, Equatable, Sendable {
   var status: ReadingStatus
   var currentPage: Int?
+  /// Jours calendaires `yyyy-MM-dd` (voir `PostgresDate.day(from:)`).
+  var startedAt: String?
+  var finishedAt: String?
   var rating: Int?
   var review: String?
   var isFavorite: Bool
@@ -124,6 +127,8 @@ struct UserBookUpdate: Encodable, Equatable, Sendable {
   init(_ userBook: UserBook) {
     status = userBook.status
     currentPage = userBook.currentPage
+    startedAt = userBook.startedAt
+    finishedAt = userBook.finishedAt
     rating = userBook.rating
     review = userBook.review
     isFavorite = userBook.isFavorite
@@ -132,6 +137,8 @@ struct UserBookUpdate: Encodable, Equatable, Sendable {
   enum CodingKeys: String, CodingKey {
     case status
     case currentPage = "current_page"
+    case startedAt = "started_at"
+    case finishedAt = "finished_at"
     case rating, review
     case isFavorite = "is_favorite"
   }
@@ -140,19 +147,106 @@ struct UserBookUpdate: Encodable, Equatable, Sendable {
     var c = encoder.container(keyedBy: CodingKeys.self)
     try c.encode(status, forKey: .status)
     try c.encode(currentPage, forKey: .currentPage)
+    try c.encode(startedAt, forKey: .startedAt)
+    try c.encode(finishedAt, forKey: .finishedAt)
     try c.encode(rating, forKey: .rating)
-    let trimmed = review?.trimmingCharacters(in: .whitespacesAndNewlines)
-    try c.encode(trimmed?.isEmpty == false ? trimmed : nil, forKey: .review)
+    try c.encode(normalizedReview, forKey: .review)
     try c.encode(isFavorite, forKey: .isFavorite)
+  }
+
+  var normalizedReview: String? {
+    let trimmed = review?.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed?.isEmpty == false ? trimmed : nil
+  }
+
+  /// Passe au statut `status` et propose les dates qui vont avec, à partir de la ligne enregistrée `saved`.
+  /// Les dates déjà modifiées dans le brouillon sont gardées, sauf celles que le nouveau statut masque,
+  /// qui reprennent leur valeur enregistrée :
+  /// - commencer un livre de la PAL le date d'aujourd'hui, même s'il porte une ancienne date de début ;
+  /// - une date de début (en cours) ou de fin (lu) vide prend la date d'aujourd'hui, comme le trigger du backend.
+  mutating func setStatus(_ status: ReadingStatus, from saved: UserBook, today: String) {
+    self.status = status
+    if status == .toRead {
+      startedAt = saved.startedAt
+    } else if status == .reading, startedAt == nil || (saved.status == .toRead && startedAt == saved.startedAt) {
+      startedAt = today
+    }
+    if status == .read {
+      if finishedAt == nil { finishedAt = today }
+    } else {
+      finishedAt = saved.finishedAt
+    }
+  }
+
+  /// La date de début est affichée pour un livre commencé.
+  var showsStartDate: Bool { status != .toRead }
+  /// La date de fin n'est affichée que pour un livre lu.
+  var showsFinishDate: Bool { status == .read }
+  /// Un livre en cours a toujours une date de début, un livre lu une date de fin : le trigger du backend
+  /// remettrait la date du jour dans une date vidée. Les autres dates affichées peuvent être effacées.
+  var canClearStartDate: Bool { status != .reading }
+  var canClearFinishDate: Bool { status != .read }
+
+  /// Message à afficher si les dates affichées sont incohérentes (dans le futur, ou fin avant début).
+  /// Les jours `yyyy-MM-dd` se comparent dans l'ordre alphabétique.
+  func dateProblem(today: String) -> String? {
+    let started = showsStartDate ? startedAt : nil
+    let finished = showsFinishDate ? finishedAt : nil
+    if let started, started > today { return "La date de début ne peut pas être dans le futur." }
+    if let finished, finished > today { return "La date de fin ne peut pas être dans le futur." }
+    if let started, let finished, finished < started {
+      return "La date de fin ne peut pas précéder la date de début."
+    }
+    return nil
   }
 }
 
+extension UserBook {
+  /// Applique `update` localement, comme le ferait le backend (y compris son trigger de dates) :
+  /// sert à la mise à jour optimiste et au mode démo.
+  func applying(_ update: UserBookUpdate, today: String) -> UserBook {
+    var item = self
+    item.status = update.status
+    item.currentPage = update.currentPage
+    item.startedAt = update.startedAt
+    item.finishedAt = update.finishedAt
+    if item.status == .reading, item.startedAt == nil { item.startedAt = today }
+    if item.status == .read, item.finishedAt == nil { item.finishedAt = today }
+    item.rating = update.rating
+    item.review = update.normalizedReview
+    item.isFavorite = update.isFavorite
+    item.updatedAt = ISO8601DateFormatter().string(from: .now)
+    return item
+  }
+}
+
+/// Ajout à la bibliothèque. Les dates du jour sont calculées dans le fuseau local : laissées vides,
+/// le trigger du backend poserait `current_date`, qui est le jour UTC.
 struct UserBookInsert: Encodable, Sendable {
   let bookId: UUID
   let status: ReadingStatus
+  var startedAt: String?
+  var finishedAt: String?
+
+  init(bookId: UUID, status: ReadingStatus, today: String) {
+    self.bookId = bookId
+    self.status = status
+    startedAt = status == .reading ? today : nil
+    finishedAt = status == .read ? today : nil
+  }
 
   enum CodingKeys: String, CodingKey {
     case bookId = "book_id"
     case status
+    case startedAt = "started_at"
+    case finishedAt = "finished_at"
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var c = encoder.container(keyedBy: CodingKeys.self)
+    try c.encode(bookId, forKey: .bookId)
+    try c.encode(status, forKey: .status)
+    try c.encodeIfPresent(startedAt, forKey: .startedAt)
+    try c.encodeIfPresent(finishedAt, forKey: .finishedAt)
   }
 }

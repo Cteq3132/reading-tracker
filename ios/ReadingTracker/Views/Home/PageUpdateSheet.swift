@@ -110,33 +110,33 @@ struct PageUpdateSheet: View {
   }
 }
 
-/// Choix d'un livre de la PAL à commencer.
+/// Choix d'un livre de la PAL à commencer. La date de début vaut aujourd'hui par défaut et se
+/// change dans la première ligne, avant de toucher « Commencer » : un seul geste dans le cas courant.
 struct StartReadingSheet: View {
   @Environment(LibraryService.self) private var library
   @Environment(\.dismiss) private var dismiss
+  @State private var startDate = Date.now
+  @State private var startingId: UUID?
   @State private var errorMessage: String?
 
   var body: some View {
     NavigationStack {
-      List(library.items(with: .toRead)) { item in
-        Button {
-          Task { await start(item) }
-        } label: {
-          HStack(spacing: 14) {
-            BookCover(url: item.book?.coverURL, title: item.book?.title ?? "", author: item.book?.authorsLine, cornerRadius: 5)
-              .frame(width: 44)
-            VStack(alignment: .leading, spacing: 2) {
-              Text(item.book?.title ?? "Sans titre")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.primary)
-              Text(item.book?.authorsLine ?? "")
-                .font(.caption)
-                .foregroundStyle(Color.secondary)
+      List {
+        Section {
+          DatePicker("Commencé le", selection: $startDate, in: ...Date.now, displayedComponents: .date)
+            .environment(\.locale, Locale(identifier: "fr_FR"))
+        } footer: {
+          Text("Aujourd'hui par défaut. Change la date si tu as commencé plus tôt.")
+        }
+
+        Section("Pile à lire") {
+          ForEach(library.items(with: .toRead)) { item in
+            Button {
+              Task { await start(item) }
+            } label: {
+              row(item)
             }
-            Spacer(minLength: 8)
-            Text("Commencer")
-              .font(.subheadline.weight(.medium))
-              .foregroundStyle(Color.accentColor)
+            .disabled(startingId != nil)
           }
         }
       }
@@ -152,9 +152,35 @@ struct StartReadingSheet: View {
     .presentationDetents([.medium, .large])
   }
 
+  private func row(_ item: UserBook) -> some View {
+    HStack(spacing: 14) {
+      BookCover(url: item.book?.coverURL, title: item.book?.title ?? "", author: item.book?.authorsLine, cornerRadius: 5)
+        .frame(width: 44)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(item.book?.title ?? "Sans titre")
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(Color.primary)
+        Text(item.book?.authorsLine ?? "")
+          .font(.caption)
+          .foregroundStyle(Color.secondary)
+      }
+      Spacer(minLength: 8)
+      if startingId == item.id {
+        ProgressView()
+      } else {
+        Text("Commencer")
+          .font(.subheadline.weight(.medium))
+          .foregroundStyle(Color.accentColor)
+      }
+    }
+  }
+
   private func start(_ item: UserBook) async {
+    startingId = item.id
+    defer { startingId = nil }
     var update = UserBookUpdate(item)
-    update.status = .reading
+    update.setStatus(.reading, from: item, today: PostgresDate.today())
+    update.startedAt = PostgresDate.day(from: startDate)
     do {
       try await library.save(id: item.id, update: update)
       dismiss()

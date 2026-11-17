@@ -68,6 +68,7 @@ RLS : lecture pour les utilisateurs connectés, **pas d'écriture directe**. On 
 | created_at, updated_at | timestamptz | `updated_at` maintenu par trigger |
 
 Contrainte : unique `(user_id, book_id)`.
+Dates de lecture : jours calendaires `yyyy-MM-dd`, que le client calcule dans le fuseau local de l'utilisateur (jamais en UTC) et peut modifier à la main ; le trigger ne remplace jamais une date fournie. Un `null` envoyé pour `started_at` d'un livre `reading`, ou pour `finished_at` d'un livre `read`, est remplacé par le trigger par `current_date` (UTC) : l'app ne propose donc d'effacer que les autres dates.
 RLS : le propriétaire fait tout. En lecture seule, la ligne est aussi visible si le profil du propriétaire est public, ou si l'utilisateur courant le suit avec un follow `accepted`.
 
 ### `follows`
