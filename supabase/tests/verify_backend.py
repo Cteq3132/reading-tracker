@@ -500,9 +500,15 @@ def section_unshelf_rest():
     status, res = call("POST", "/rest/v1/pal_goals", A["token"],
                        {"user_id": A["id"], "target": 2, "deadline": "2027-12-31"},
                        {"Prefer": "resolution=merge-duplicates,return=representation"})
-    check("upsert sur user_id (ce que fait l'app) : cible et échéance mises à jour",
+    check("upsert avec user_id dans le corps : cible et échéance mises à jour",
           status in (200, 201) and res and res[0]["target"] == 2 and res[0]["deadline"] == "2027-12-31"
           and res[0]["start_size"] == len(pal) - 1 and parse_ts(res[0]["set_at"]) > parse_ts(retargeted["set_at"]),
+          f"HTTP {status} {show(res)[:200]}")
+    status, res = call("POST", "/rest/v1/pal_goals?on_conflict=user_id", A["token"], {"target": 3, "deadline": None},
+                       {"Prefer": "resolution=merge-duplicates,return=representation"})
+    check("upsert sans user_id (forme de l'app iOS, on_conflict=user_id) : la ligne de A est mise à jour",
+          status in (200, 201) and len(res) == 1 and res[0]["user_id"] == A["id"] and res[0]["target"] == 3
+          and res[0]["deadline"] is None and len(rows(goal_path + "&select=user_id", A["token"])) == 1,
           f"HTTP {status} {show(res)[:200]}")
     status, res = call("POST", "/rest/v1/pal_goals", A["token"], {"user_id": A["id"], "target": 1, "start_size": 99})
     check("start_size refusé à l'insertion", status in (401, 403), f"HTTP {status} {show(res)[:120]}")

@@ -43,7 +43,7 @@ RLS : lecture pour tout utilisateur connecté ; mise à jour de sa propre ligne 
 | set_at | timestamptz not null | posé par trigger (à ne pas envoyer) |
 
 Pas de ligne = pas d'objectif : l'app insère la ligne pour fixer un objectif et la supprime pour le retirer.
-L'app écrit `target` et `deadline` (insertion, mise à jour, ou upsert : `POST` avec `Prefer: resolution=merge-duplicates` et un corps qui contient `user_id`) ; envoyer `start_size` ou `set_at` est refusé (403). À l'insertion, et quand `target` change, un trigger pose `start_size` (nombre de `user_books` du compte en `to_read` à cet instant) et `set_at = now()` ; changer seulement `deadline`, ou renvoyer la même cible, ne les touche pas. Progression = `(start_size − taille actuelle) / (start_size − target)`, bornée à [0, 1].
+L'app écrit `target` et `deadline` (insertion, mise à jour, ou upsert : `POST ?on_conflict=user_id` avec `Prefer: resolution=merge-duplicates` ; `user_id` peut être omis, il vaut `auth.uid()`) ; envoyer `start_size` ou `set_at` est refusé (403). À l'insertion, et quand `target` change, un trigger pose `start_size` (nombre de `user_books` du compte en `to_read` à cet instant) et `set_at = now()` ; changer seulement `deadline`, ou renvoyer la même cible, ne les touche pas. Progression = `(start_size − taille actuelle) / (start_size − target)`, bornée à [0, 1].
 RLS : le propriétaire seul lit, crée, modifie et supprime sa ligne. L'objectif n'est visible de personne d'autre, même d'un abonné ou si le profil est public.
 
 ### `books` — cache partagé des fiches
