@@ -159,21 +159,31 @@ struct UserBookUpdate: Encodable, Equatable, Sendable {
     return trimmed?.isEmpty == false ? trimmed : nil
   }
 
-  /// Passe au statut `status` et propose les dates qui vont avec, à partir de la ligne enregistrée `saved`.
-  /// Les dates déjà modifiées dans le brouillon sont gardées, sauf celles que le nouveau statut masque,
-  /// qui reprennent leur valeur enregistrée :
-  /// - commencer un livre de la PAL le date d'aujourd'hui, même s'il porte une ancienne date de début ;
-  /// - une date de début (en cours) ou de fin (lu) vide prend la date d'aujourd'hui, comme le trigger du backend.
+  /// Passe au statut `status` et propose les dates qui vont avec, à partir de la ligne enregistrée `saved` :
+  /// - revenir au statut enregistré rend ses dates ;
+  /// - une date masquée par le nouveau statut reprend sa valeur enregistrée ;
+  /// - commencer un livre de la PAL ou en relire un déjà lu le date d'aujourd'hui, sauf date déjà modifiée ici ;
+  /// - finir un livre le date d'aujourd'hui, l'ancienne date de fin d'une lecture précédente ne valant plus ;
+  /// - reprendre un livre abandonné garde sa date de début.
+  /// Les autres dates modifiées dans le brouillon sont gardées.
   mutating func setStatus(_ status: ReadingStatus, from saved: UserBook, today: String) {
     self.status = status
-    if status == .toRead {
+    guard status != saved.status else {
       startedAt = saved.startedAt
-    } else if status == .reading, startedAt == nil || (saved.status == .toRead && startedAt == saved.startedAt) {
-      startedAt = today
+      finishedAt = saved.finishedAt
+      return
     }
-    if status == .read {
-      if finishedAt == nil { finishedAt = today }
-    } else {
+    switch status {
+    case .toRead:
+      startedAt = saved.startedAt
+      finishedAt = saved.finishedAt
+    case .reading:
+      let restarts = saved.status == .toRead || saved.status == .read
+      if startedAt == nil || (restarts && startedAt == saved.startedAt) { startedAt = today }
+      finishedAt = saved.finishedAt
+    case .read:
+      if finishedAt == nil || finishedAt == saved.finishedAt { finishedAt = today }
+    case .abandoned:
       finishedAt = saved.finishedAt
     }
   }

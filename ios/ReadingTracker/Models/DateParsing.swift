@@ -33,26 +33,36 @@ enum PostgresDate {
 
   // MARK: Colonnes `date` (jour calendaire, sans heure ni fuseau)
 
+  /// Calendrier grégorien dans le fuseau de l'appareil. `Calendar.current` suivrait le calendrier
+  /// choisi dans Réglages (bouddhiste, japonais…) et produirait une autre année.
+  static var localCalendar: Calendar {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = .current
+    return calendar
+  }
+
   /// Jour calendaire de `date` dans le fuseau de `calendar`, au format Postgres `yyyy-MM-dd`.
   /// Lit les composants du calendrier local au lieu de formater en UTC : une lecture commencée
   /// à 23 h à Paris reste datée du jour même, et non du lendemain.
-  static func day(from date: Date, calendar: Calendar = .current) -> String {
+  static func day(from date: Date, calendar: Calendar = localCalendar) -> String {
     let c = calendar.dateComponents([.year, .month, .day], from: date)
     return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
   }
 
   /// Jour calendaire d'aujourd'hui, dans le fuseau local.
-  static func today(calendar: Calendar = .current) -> String {
+  static func today(calendar: Calendar = localCalendar) -> String {
     day(from: .now, calendar: calendar)
   }
 
   /// Date à midi, heure locale, du jour `yyyy-MM-dd` : midi évite les jours où minuit n'existe
   /// pas (changement d'heure) et reste dans le bon jour quel que soit le fuseau.
-  static func date(fromDay day: String, calendar: Calendar = .current) -> Date? {
+  static func date(fromDay day: String, calendar: Calendar = localCalendar) -> Date? {
     let parts = day.split(separator: "-").compactMap { Int($0) }
     guard day.count == 10, parts.count == 3 else { return nil }
     let components = DateComponents(year: parts[0], month: parts[1], day: parts[2], hour: 12)
+    // Refuse les dépassements (« 2026-13-01 », « 2026-02-30 ») que Calendar reporterait au mois suivant.
     guard let date = calendar.date(from: components),
+          calendar.component(.month, from: date) == parts[1],
           calendar.component(.day, from: date) == parts[2] else { return nil }
     return date
   }

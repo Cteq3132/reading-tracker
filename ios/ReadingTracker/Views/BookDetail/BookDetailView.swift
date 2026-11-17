@@ -217,7 +217,7 @@ struct BookDetailView: View {
   private var hasChanges: Bool {
     guard let item, let draft else { return false }
     var normalized = draft
-    if normalized.review?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true { normalized.review = nil }
+    normalized.review = normalized.normalizedReview
     return normalized != UserBookUpdate(item)
   }
 
@@ -263,8 +263,6 @@ private struct ReadingDateRow: View {
   /// Jour proposé par « Ajouter » ; aujourd'hui par défaut.
   var suggestion: String? = nil
 
-  private static let french = Locale(identifier: "fr_FR")
-
   var body: some View {
     if let current = day.flatMap({ PostgresDate.date(fromDay: $0) }) {
       LabeledContent(title) {
@@ -288,7 +286,6 @@ private struct ReadingDateRow: View {
             displayedComponents: .date
           )
           .labelsHidden()
-          .environment(\.locale, Self.french)
         }
       }
     } else {

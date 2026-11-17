@@ -43,9 +43,22 @@ struct ReadingDatesTests {
     }
   }
 
+  @Test("Le calendrier par défaut est grégorien, quel que soit le calendrier choisi dans Réglages")
+  func defaultCalendarIsGregorian() {
+    #expect(PostgresDate.localCalendar.identifier == .gregorian)
+    #expect(PostgresDate.localCalendar.timeZone == .current)
+    var buddhist = Calendar(identifier: .buddhist)
+    buddhist.timeZone = TimeZone(identifier: "Europe/Paris")!
+    // Ce qu'aurait envoyé Calendar.current sur un iPhone réglé en calendrier bouddhiste.
+    #expect(PostgresDate.day(from: instant("2026-11-17T10:00:00Z"), calendar: buddhist) == "2569-11-17")
+    #expect(PostgresDate.day(from: instant("2026-11-17T10:00:00Z"), calendar: calendar("Europe/Paris")) == "2026-11-17")
+  }
+
   @Test("Un jour invalide est refusé")
   func invalidDay() {
     #expect(PostgresDate.date(fromDay: "2026-02-30") == nil)
+    #expect(PostgresDate.date(fromDay: "2026-13-01") == nil)
+    #expect(PostgresDate.date(fromDay: "2026-00-10") == nil)
     #expect(PostgresDate.date(fromDay: "17/11/2026") == nil)
     #expect(PostgresDate.date(fromDay: "") == nil)
   }
@@ -71,6 +84,21 @@ struct ReadingDatesTests {
     var update = UserBookUpdate(saved)
     update.setStatus(.reading, from: saved, today: "2026-11-17")
     #expect(update.startedAt == "2026-11-17")
+  }
+
+  @Test("Relire un livre déjà lu le date d'aujourd'hui, et le finir aussi")
+  func rereadBook() {
+    let saved = userBook(.read, started: "2025-03-01", finished: "2025-03-20")
+    var update = UserBookUpdate(saved)
+    update.setStatus(.reading, from: saved, today: "2026-11-17")
+    #expect(update.startedAt == "2026-11-17")
+    #expect(update.finishedAt == "2025-03-20")
+
+    let reading = userBook(.reading, started: "2026-11-01", finished: "2025-03-20")
+    var finish = UserBookUpdate(reading)
+    finish.setStatus(.read, from: reading, today: "2026-11-17")
+    #expect(finish.startedAt == "2026-11-01")
+    #expect(finish.finishedAt == "2026-11-17")
   }
 
   @Test("Reprendre un livre abandonné garde sa date de début")
