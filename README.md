@@ -12,6 +12,11 @@ Le contrat entre le backend et l'app est dans [docs/CONTRAT.md](docs/CONTRAT.md)
 2. Ouvrir `ios/ReadingTracker.xcodeproj` dans Xcode (iOS 26 minimum).
 3. L'argument de lancement `-demo` affiche des données d'exemple, sans réseau.
 
+## CI et TestFlight
+
+Chaque PR est compilée par GitHub Actions ; chaque fusion sur `main` part sur TestFlight.
+Mise en place côté Apple et secrets à poser : [docs/CI.md](docs/CI.md).
+
 ## Backend
 
 Le schéma est dans `supabase/migrations/`, la fonction de recherche dans

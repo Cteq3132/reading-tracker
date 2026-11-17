@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Options de xcodebuild -exportArchive pour la CI (.github/workflows/testflight.yml).
+  Clés et valeurs : `xcodebuild -help`, section « Available keys for -exportOptionsPlist ».
+  teamID est omis : il reprend l'équipe de l'archive (DEVELOPMENT_TEAM passé par la CI).
+-->
+<plist version="1.0">
+<dict>
+	<key>method</key>
+	<string>app-store-connect</string>
+	<key>destination</key>
+	<string>upload</string>
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<!-- Le numéro de build vient de la CI (github.run_number) : Xcode ne doit pas le changer. -->
+	<key>manageAppVersionAndBuildNumber</key>
+	<false/>
+	<key>uploadSymbols</key>
+	<true/>
+</dict>
+</plist>
