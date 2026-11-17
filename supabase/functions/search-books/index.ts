@@ -24,7 +24,8 @@
 //     appel qui interroge les sources prend le complément jusqu'à
 //     cost_external ; au-delà, HTTP 429 avec Retry-After ;
 //   - Hardcover : plafond global d'appels sortants ; une fois atteint, la
-//     recherche continue sans Hardcover.
+//     recherche continue sans Hardcover, et son résultat n'est gardé qu'un jour
+//     en cache.
 
 type Source = "google" | "hardcover" | "bnf" | "openlibrary";
 
@@ -61,10 +62,15 @@ const CORS_HEADERS = {
   "Access-Control-Expose-Headers": "Retry-After",
 };
 
+// Verdict de la limite par utilisateur : retryAfter = 0 si l'appel continue,
+// sinon le délai Retry-After et la fenêtre pleine.
+type RateVerdict = { retryAfter: number; window: "minute" | "day" };
+const ALLOWED: RateVerdict = { retryAfter: 0, window: "minute" };
+
 // Limite par utilisateur dépassée : la recherche s'arrête, réponse 429.
 class RateLimited extends Error {
-  constructor(readonly retryAfter: number) {
-    super(`limite de débit, réessayer dans ${retryAfter} s`);
+  constructor(readonly verdict: RateVerdict) {
+    super(`limite de débit (${verdict.window}), réessayer dans ${verdict.retryAfter} s`);
   }
 }
 
@@ -86,8 +92,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
   const db = new Db(user, req.headers.get("apikey"));
 
   // Chaque appel compte, même invalide ou servi par le cache.
-  const wait = await db.rateLimit("request");
-  if (wait > 0) return tooManyRequests(wait);
+  const verdict = await db.rateLimit("request");
+  if (verdict.retryAfter > 0) return tooManyRequests(verdict);
 
   let body: unknown;
   try {
@@ -107,16 +113,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
       : await searchByQuery(input, db);
     return json({ results });
   } catch (error) {
-    if (error instanceof RateLimited) return tooManyRequests(error.retryAfter);
+    if (error instanceof RateLimited) return tooManyRequests(error.verdict);
     throw error;
   }
 });
 
-function tooManyRequests(retryAfter: number): Response {
-  const error = retryAfter <= 60
+function tooManyRequests({ retryAfter, window }: RateVerdict): Response {
+  const error = window === "minute"
     ? `Trop de recherches en peu de temps. Réessaie dans ${retryAfter} s.`
     : `Limite de recherches du jour atteinte. Réessaie dans ${formatDelay(retryAfter)}.`;
-  console.log(`search-books: limite atteinte, Retry-After ${retryAfter} s`);
+  console.log(`search-books: limite ${window} atteinte, Retry-After ${retryAfter} s`);
   return json({ error, retry_after: retryAfter }, 429, { "Retry-After": String(retryAfter) });
 }
 
@@ -128,6 +134,7 @@ function formatDelay(seconds: number): string {
 }
 
 const CACHE_TTL_MS = 30 * 24 * 3600 * 1000;
+const CAPPED_CACHE_TTL_MS = 24 * 3600 * 1000;
 
 async function searchByIsbn(
   input: Extract<SearchInput, { kind: "isbn" }>,
@@ -148,7 +155,7 @@ async function searchByIsbn(
   }
 
   const external = await searchExternal(input, db);
-  if (external.complete) await db.writeCache(key, external.results);
+  if (external.complete) await db.writeCache(key, external.results, external.cacheTtlMs);
   const found = external.results[0];
   if (!found) return row ? [row] : [];
 
@@ -170,7 +177,9 @@ async function searchByQuery(
     const external = await searchExternal(input, db);
     results = external.results;
     // Un résultat dégradé (source en panne) n'est pas mis en cache.
-    if (external.complete && results.length > 0) await db.writeCache(key, results);
+    if (external.complete && results.length > 0) {
+      await db.writeCache(key, results, external.cacheTtlMs);
+    }
   }
   return await db.annotate(results);
 }
@@ -186,14 +195,15 @@ function isComplete(b: BookCandidate): boolean {
 
 // Interroge toutes les sources, après avoir pris la part « externe » de la
 // limite de l'utilisateur (RateLimited si elle est dépassée).
-// complete = aucune source activée n'a échoué ni été écartée par le plafond
-// Hardcover : un résultat sans Hardcover n'est pas mis en cache.
+// complete = aucune source activée n'a échoué. Si le plafond Hardcover a
+// écarté Hardcover, le résultat reste bon mais n'est gardé qu'un jour en
+// cache, pour que Hardcover y figure dès que le plafond est rendu.
 async function searchExternal(
   input: SearchInput,
   db: Db,
-): Promise<{ results: BookCandidate[]; complete: boolean }> {
-  const wait = await db.rateLimit("external");
-  if (wait > 0) throw new RateLimited(wait);
+): Promise<{ results: BookCandidate[]; complete: boolean; cacheTtlMs: number }> {
+  const verdict = await db.rateLimit("external");
+  if (verdict.retryAfter > 0) throw new RateLimited(verdict);
 
   const googleKey = Deno.env.get("GOOGLE_BOOKS_API_KEY")?.trim();
   const hardcoverToken = Deno.env.get("HARDCOVER_API_TOKEN")?.trim();
@@ -204,7 +214,7 @@ async function searchExternal(
       ? db.takeHardcover().then((ok) => {
         if (ok) return withSource("hardcover", (s) => searchHardcover(input, hardcoverToken, s));
         hardcoverCapped = true;
-        return null;
+        return [];
       })
       : Promise.resolve([]),
     withSource("bnf", (s) => searchBnf(input, s)),
@@ -229,7 +239,7 @@ async function searchExternal(
       `hardcover=${hardcoverCapped ? "plafond" : n(hardcover)} ` +
       `bnf=${n(bnf)} openlibrary=${n(openlibrary)} → ${results.length}`,
   );
-  return { results, complete };
+  return { results, complete, cacheTtlMs: hardcoverCapped ? CAPPED_CACHE_TTL_MS : CACHE_TTL_MS };
 }
 
 // ---------------------------------------------------------------------------
@@ -357,18 +367,25 @@ class Db {
     }, plain);
   }
 
-  // Limite par utilisateur : 0 si l'appel peut continuer, sinon le délai
-  // Retry-After en secondes. Sans clé service (développement local), pas de limite.
-  rateLimit(step: "request" | "external"): Promise<number> {
-    if (!this.serviceKey) return Promise.resolve(0);
+  // Fonction interne de la base, appelée avec la clé service.
+  private serviceRpc(name: string, args: Record<string, unknown>): Promise<unknown> {
+    return this.request(`/rest/v1/rpc/${name}`, { method: "POST", service: true, body: args });
+  }
+
+  // Limite par utilisateur. Sans clé service (développement local) ou si la
+  // base ne répond pas, l'appel passe.
+  rateLimit(step: "request" | "external"): Promise<RateVerdict> {
+    if (!this.serviceKey) return Promise.resolve(ALLOWED);
     return this.safe(`limite de débit (${step})`, async () => {
-      const wait = await this.request("/rest/v1/rpc/search_books_rate_limit", {
-        method: "POST",
-        service: true,
-        body: { p_user: this.userId, p_step: step },
-      });
-      return typeof wait === "number" ? wait : 0;
-    }, 0);
+      const r = await this.serviceRpc("search_books_rate_limit", {
+        p_user: this.userId,
+        p_step: step,
+      }) as { retry_after?: number; window?: string } | null;
+      const retryAfter = typeof r?.retry_after === "number" ? r.retry_after : 0;
+      return retryAfter > 0
+        ? { retryAfter, window: r?.window === "day" ? "day" : "minute" }
+        : ALLOWED;
+    }, ALLOWED);
   }
 
   // Plafond global Hardcover : true si l'appel sortant peut partir (il est
@@ -376,11 +393,7 @@ class Db {
   takeHardcover(): Promise<boolean> {
     if (!this.serviceKey) return Promise.resolve(true);
     return this.safe("plafond Hardcover", async () => {
-      return await this.request("/rest/v1/rpc/hardcover_take", {
-        method: "POST",
-        service: true,
-        body: {},
-      }) === true;
+      return await this.serviceRpc("hardcover_take", {}) === true;
     }, false);
   }
 
@@ -400,7 +413,8 @@ class Db {
     }, null);
   }
 
-  async writeCache(key: string, results: BookCandidate[]): Promise<void> {
+  // ttlMs < CACHE_TTL_MS : created_at est antidaté pour que l'entrée périme plus tôt.
+  async writeCache(key: string, results: BookCandidate[], ttlMs = CACHE_TTL_MS): Promise<void> {
     if (!this.serviceKey) return;
     await this.safe("écriture de search_cache", async () => {
       await this.request("/rest/v1/search_cache", {
@@ -410,7 +424,7 @@ class Db {
         body: {
           query_key: key,
           results: results.map(({ book_id: _ignored, ...c }) => c),
-          created_at: new Date().toISOString(),
+          created_at: new Date(Date.now() - (CACHE_TTL_MS - ttlMs)).toISOString(),
         },
       });
     }, undefined);

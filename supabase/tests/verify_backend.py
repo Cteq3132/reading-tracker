@@ -373,85 +373,114 @@ for fn, body in (("search_books_rate_limit", {"p_user": A["id"], "p_step": "requ
     status, res = call("POST", f"/rest/v1/rpc/{fn}", A["token"], body)
     check(f"RPC {fn} refusée à un utilisateur", status in (401, 403, 404), f"HTTP {status} {show(res)[:120]}")
 
-settings = sql("select * from public.rate_limit_settings")[0]
-print("rate_limit_settings:", show(settings))
-per_min, per_day = settings["user_per_minute"], settings["user_per_day"]
-cost_cached, cost_external = settings["cost_cached"], settings["cost_external"]
-cached_isbn = {"isbn": "9782818051382"}  # Yoga, déjà dans books : servi sans source externe
 
-try:
-    # Le cache compte peu : un appel servi par books passe là où une recherche
-    # externe est refusée (avant tout appel aux sources).
-    wait_for_fresh_minute()
-    set_user_counter(A["id"], "minute", per_min - cost_external + 1)
+def section_rate_limits():
+    rights = sql("""
+      select r.role,
+             has_table_privilege(r.role, 'public.rate_limit_counters', 'select,insert,update,delete') as counters,
+             has_table_privilege(r.role, 'public.rate_limit_settings', 'select,update') as settings,
+             has_function_privilege(r.role, 'public.rate_limit_take(text,int,int,int)', 'execute') as take,
+             has_function_privilege(r.role, 'public.search_books_rate_limit(uuid,text)', 'execute') as limit_fn,
+             has_function_privilege(r.role, 'public.hardcover_take()', 'execute') as hardcover
+        from unnest(array['anon', 'authenticated', 'service_role']) as r(role)""")
+    print("droits:", show(rights))
+    by_role = {r.pop("role"): r for r in rights}
+    check("tables et fonctions de limite : aucun droit pour anon ni authenticated, tous pour service_role",
+          len(by_role) == 3 and not any(any(by_role[r].values()) for r in ("anon", "authenticated"))
+          and all(by_role["service_role"].values()), show(by_role))
+
+    settings = sql("select * from public.rate_limit_settings")[0]
+    print("rate_limit_settings:", show(settings))
+    per_min, per_day = settings["user_per_minute"], settings["user_per_day"]
+    cost_cached, cost_external = settings["cost_cached"], settings["cost_external"]
+    cached_isbn = {"isbn": "9782818051382"}  # Yoga, déjà dans books : servi sans source externe
+
+    try:
+        # Le cache compte peu : un appel servi par books passe là où une recherche
+        # externe est refusée (avant tout appel aux sources).
+        wait_for_fresh_minute()
+        set_user_counter(A["id"], "minute", per_min - cost_external + 1)
+        status, _, res = call_raw(A["token"], cached_isbn)
+        check("limite minute presque atteinte : une recherche servie par le cache passe", status == 200,
+              f"HTTP {status} {show(res)[:150]}")
+        status, headers, res = call_raw(A["token"], {"query": f"zzqx introuvable {secrets.token_hex(4)}"})
+        retry = headers.get("Retry-After")
+        print(f"recherche externe au-delà de la limite → HTTP {status}, Retry-After {retry}, {show(res)}")
+        check("limite minute : une recherche qui irait aux sources → 429, Retry-After ≤ 60, message en français",
+              status == 429 and retry is not None and 1 <= int(retry) <= 60 and isinstance(res, dict)
+              and res.get("retry_after") == int(retry) and "Réessaie" in res.get("error", ""),
+              f"HTTP {status} {retry} {show(res)[:200]}")
+
+        # Atomicité : 12 appels simultanés pour 5 places → exactement 5 passent.
+        wait_for_fresh_minute()
+        set_user_counter(A["id"], "minute", per_min - 5 * cost_cached)
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            statuses = sorted(s for s, _, _ in pool.map(lambda _: call_raw(A["token"], cached_isbn), range(12)))
+        print("12 appels simultanés pour 5 places :", statuses)
+        check("compteur atomique : 12 appels simultanés pour 5 places → 5 × 200 et 7 × 429",
+              statuses.count(200) == 5 and statuses.count(429) == 7, str(statuses))
+
+        # Limite du jour : Retry-After jusqu'à minuit UTC.
+        sql(f"delete from public.rate_limit_counters where bucket = 'user:{A['id']}' and period = 'minute'", write=True)
+        set_user_counter(A["id"], "day", per_day)
+        status, headers, res = call_raw(A["token"], cached_isbn)
+        retry = headers.get("Retry-After")
+        now = time.gmtime()
+        to_midnight = 86400 - (now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec)
+        print(f"limite du jour → HTTP {status}, Retry-After {retry} (minuit UTC dans {to_midnight} s), {show(res)}")
+        check("limite du jour → 429, Retry-After jusqu'à minuit UTC, message « du jour »",
+              status == 429 and retry is not None and abs(int(retry) - to_midnight) <= 5
+              and "du jour" in res.get("error", ""), f"HTTP {status} {retry} {show(res)[:200]}")
+    finally:
+        sql(f"delete from public.rate_limit_counters where bucket = 'user:{A['id']}'", write=True)
     status, _, res = call_raw(A["token"], cached_isbn)
-    check("limite minute presque atteinte : une recherche servie par le cache passe", status == 200,
-          f"HTTP {status} {show(res)[:150]}")
-    status, headers, res = call_raw(A["token"], {"query": f"zzqx introuvable {secrets.token_hex(4)}"})
-    retry = headers.get("Retry-After")
-    print(f"recherche externe au-delà de la limite → HTTP {status}, Retry-After {retry}, {show(res)}")
-    check("limite minute : une recherche qui irait aux sources → 429, Retry-After ≤ 60, message en français",
-          status == 429 and retry is not None and 1 <= int(retry) <= 60 and isinstance(res, dict)
-          and res.get("retry_after") == int(retry) and "Réessaie" in res.get("error", ""),
-          f"HTTP {status} {retry} {show(res)[:200]}")
+    check("compteurs de A remis à zéro : la recherche repasse", status == 200, f"HTTP {status}")
 
-    # Atomicité : 12 appels simultanés pour 5 places → exactement 5 passent.
-    wait_for_fresh_minute()
-    set_user_counter(A["id"], "minute", per_min - 5 * cost_cached)
-    with ThreadPoolExecutor(max_workers=12) as pool:
-        statuses = sorted(s for s, _, _ in pool.map(lambda _: call_raw(A["token"], cached_isbn), range(12)))
-    print("12 appels simultanés pour 5 places :", statuses)
-    check("compteur atomique : 12 appels simultanés pour 5 places → 5 × 200 et 7 × 429",
-          statuses.count(200) == 5 and statuses.count(429) == 7, str(statuses))
-
-    # Limite du jour : Retry-After jusqu'à minuit UTC.
-    sql(f"delete from public.rate_limit_counters where bucket = 'user:{A['id']}' and period = 'minute'", write=True)
-    set_user_counter(A["id"], "day", per_day)
-    status, headers, res = call_raw(A["token"], cached_isbn)
-    retry = headers.get("Retry-After")
-    now = time.gmtime()
-    to_midnight = 86400 - (now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec)
-    print(f"limite du jour → HTTP {status}, Retry-After {retry} (minuit UTC dans {to_midnight} s), {show(res)}")
-    check("limite du jour → 429, Retry-After jusqu'à minuit UTC, message « du jour »",
-          status == 429 and retry is not None and abs(int(retry) - to_midnight) <= 5
-          and "du jour" in res.get("error", ""), f"HTTP {status} {retry} {show(res)[:200]}")
-finally:
-    sql(f"delete from public.rate_limit_counters where bucket = 'user:{A['id']}'", write=True)
-status, _, res = call_raw(A["token"], cached_isbn)
-check("compteurs de A remis à zéro : la recherche repasse", status == 200, f"HTTP {status}")
-
-# Plafond Hardcover : la recherche continue sans Hardcover, sans être mise en cache.
-hc_query, hc_key = {"query": "project hail mary"}, "q:project hail mary"
-hc_count = ("select coalesce(sum(hits), 0)::int as n from public.rate_limit_counters "
-            "where bucket = 'hardcover' and period = 'day' and window_start = date_trunc('day', now(), 'UTC')")
-cap = settings["hardcover_per_day"]
-sql(f"delete from public.search_cache where query_key = '{hc_key}'", write=True)
-sql("insert into public.rate_limit_counters (bucket, period, window_start, hits) "
-    f"values ('hardcover', 'day', date_trunc('day', now(), 'UTC'), {cap}) "
-    f"on conflict (bucket, period, window_start) do update set hits = rate_limit_counters.hits + {cap}", write=True)
-try:
-    before = sql(hc_count)[0]["n"]
+    # Plafond Hardcover : la recherche continue sans Hardcover ; le résultat
+    # n'est gardé qu'un jour en cache. La fenêtre du jour est figée une fois,
+    # pour que la remise en état vise la même ligne même après minuit UTC.
+    # Pendant ces quelques secondes, Hardcover est coupé pour toute l'app.
+    hc_query, hc_key = {"query": "project hail mary"}, "q:project hail mary"
+    day = sql("select date_trunc('day', now(), 'UTC') as d")[0]["d"]
+    hc_row = f"bucket = 'hardcover' and period = 'day' and window_start = '{day}'::timestamptz"
+    hc_count = f"select coalesce(sum(hits), 0)::int as n from public.rate_limit_counters where {hc_row}"
+    cache_age = ("select extract(epoch from now() - created_at)::int as age from public.search_cache "
+                 f"where query_key = '{hc_key}'")
+    cap = settings["hardcover_per_day"]
+    sql(f"delete from public.search_cache where query_key = '{hc_key}'", write=True)
+    sql("insert into public.rate_limit_counters (bucket, period, window_start, hits) "
+        f"values ('hardcover', 'day', '{day}'::timestamptz, {cap}) "
+        f"on conflict (bucket, period, window_start) do update set hits = rate_limit_counters.hits + {cap}", write=True)
+    try:
+        before = sql(hc_count)[0]["n"]
+        status, _, res = call_raw(B["token"], hc_query)
+        results = res.get("results", []) if isinstance(res, dict) else []
+        after = sql(hc_count)[0]["n"]
+        age = [r["age"] for r in sql(cache_age)]
+        print(f"plafond Hardcover atteint → HTTP {status}, {len(results)} résultats, sources",
+              sorted({r["source"] for r in results}), f"compteur {before} → {after}, âge en cache : {age}")
+        check("plafond Hardcover atteint : recherche 200 avec résultats, sans Hardcover ni appel sortant compté",
+              status == 200 and results and all(r["source"] != "hardcover" for r in results) and after == before,
+              f"HTTP {status} {show(res)[:200]}")
+        # readCache garde 30 jours : antidaté de 29 jours, l'entrée périme dans un jour.
+        check("plafond Hardcover atteint : résultat gardé un jour seulement en cache",
+              len(age) == 1 and 29 * 86400 - 60 <= age[0] <= 29 * 86400 + 60, str(age))
+    finally:
+        sql(f"update public.rate_limit_counters set hits = greatest(hits - {cap}, 0) where {hc_row}", write=True)
+        sql(f"delete from public.search_cache where query_key = '{hc_key}'", write=True)
     status, _, res = call_raw(B["token"], hc_query)
     results = res.get("results", []) if isinstance(res, dict) else []
-    after = sql(hc_count)[0]["n"]
-    cached = sql(f"select count(*)::int as n from public.search_cache where query_key = '{hc_key}'")[0]["n"]
-    print(f"plafond Hardcover atteint → HTTP {status}, {len(results)} résultats, sources",
-          sorted({r["source"] for r in results}), f"compteur {before} → {after}, en cache : {cached}")
-    check("plafond Hardcover atteint : recherche 200 avec résultats, sans Hardcover ni appel sortant compté",
-          status == 200 and results and all(r["source"] != "hardcover" for r in results) and after == before,
-          f"HTTP {status} {show(res)[:200]}")
-    check("plafond Hardcover atteint : le résultat incomplet n'est pas mis en cache", cached == 0)
-finally:
-    sql("update public.rate_limit_counters set hits = greatest(hits - "
-        f"{cap}, 0) where bucket = 'hardcover' and period = 'day' and window_start = date_trunc('day', now(), 'UTC')",
-        write=True)
-status, _, res = call_raw(B["token"], hc_query)
-results = res.get("results", []) if isinstance(res, dict) else []
-cached = sql(f"select count(*)::int as n from public.search_cache where query_key = '{hc_key}'")[0]["n"]
-check("plafond Hardcover rendu : Hardcover revient et le résultat est remis en cache",
-      status == 200 and any(r["source"] == "hardcover" for r in results) and cached == 1,
-      f"HTTP {status} sources {sorted({r['source'] for r in results})} cache {cached}")
-print("compteur Hardcover du jour :", sql(hc_count)[0]["n"], "/", cap)
+    age = [r["age"] for r in sql(cache_age)]
+    check("plafond Hardcover rendu : Hardcover revient et le résultat est gardé 30 jours en cache",
+          status == 200 and any(r["source"] == "hardcover" for r in results) and len(age) == 1 and age[0] < 600,
+          f"HTTP {status} sources {sorted({r['source'] for r in results})} âge {age}")
+    print("compteur Hardcover du jour :", sql(hc_count)[0]["n"], "/", cap)
+
+
+try:
+    section_rate_limits()
+except (RuntimeError, subprocess.TimeoutExpired, FileNotFoundError) as error:
+    check("contrôles des limites de débit (CLI supabase requise)", False, str(error)[:300])
 
 print()
 print("RÉSULTAT :", "tout est passé" if not failures else f"{len(failures)} échec(s) : {failures}")

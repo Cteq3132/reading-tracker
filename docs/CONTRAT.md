@@ -126,7 +126,7 @@ Ordre de priorité des champs : Google > Hardcover > BnF > Open Library. Toute `
 
 ### Limites de débit
 
-L'URL et la clé publishable sont publiques (dépôt open source, app distribuée) : n'importe qui peut créer un compte et appeler `search-books`. La fonction limite donc chaque compte et protège le quota Hardcover. Les compteurs sont dans Postgres : fenêtres fixes d'une minute et d'un jour UTC (remise à zéro à minuit UTC), tables `rate_limit_settings` et `rate_limit_counters`, fonctions `search_books_rate_limit` et `hardcover_take`. Rien de tout cela n'est accessible à `anon` ni à `authenticated`.
+L'URL et la clé publishable sont publiques (dépôt open source, app distribuée) : n'importe qui peut créer un compte et appeler `search-books`. La fonction limite donc chaque compte et protège le quota Hardcover. Les compteurs sont dans Postgres : fenêtres fixes d'une minute et d'un jour UTC (remise à zéro à minuit UTC), tables `rate_limit_settings` et `rate_limit_counters`, fonctions `rate_limit_take`, `search_books_rate_limit` et `hardcover_take`. Rien de tout cela n'est accessible à `anon` ni à `authenticated`.
 
 **Par utilisateur**, en unités :
 | appel | coût |
@@ -147,9 +147,9 @@ Retry-After: 42
 { "error": "Trop de recherches en peu de temps. Réessaie dans 42 s.", "retry_after": 42 }
 ```
 
-`Retry-After` et `retry_after` donnent le même nombre de secondes avant l'ouverture de la fenêtre pleine : 60 au plus pour la minute, jusqu'à minuit UTC pour le jour (message « Limite de recherches du jour atteinte. Réessaie dans 5 h 12 min. »). `error` est en français et peut être affiché tel quel. L'app ne relance pas automatiquement ; elle peut désactiver la recherche pendant `retry_after` secondes.
+`Retry-After` et `retry_after` donnent le même nombre de secondes avant l'ouverture de la fenêtre pleine : 60 au plus pour la minute, jusqu'à minuit UTC pour le jour (message « Limite de recherches du jour atteinte. Réessaie dans 5 h 12 min. »). Si les deux sont pleines, c'est le jour qui compte. `error` est en français et peut être affiché tel quel. L'app ne relance pas automatiquement ; elle peut désactiver la recherche pendant `retry_after` secondes.
 
-**Global, pour Hardcover** : au plus 50 appels sortants par minute et 4 000 par jour UTC, sous le quota du jeton (60/min, 5 000/jour), toute l'app confondue. Au-delà, la recherche continue sans Hardcover, sans erreur : les autres sources répondent, et ce résultat n'est pas mis en cache, pour que la même recherche profite de Hardcover le lendemain.
+**Global, pour Hardcover** : au plus 50 appels sortants par minute et 4 000 par jour UTC, sous le quota du jeton (60/min, 5 000/jour), toute l'app confondue. Au-delà, la recherche continue sans Hardcover, sans erreur : les autres sources répondent, et ce résultat n'est gardé qu'un jour en cache (au lieu de 30), pour que la même recherche profite de Hardcover une fois le plafond rendu.
 
 Les seuils et les coûts sont dans la ligne unique de `rate_limit_settings`, modifiable sans redéploiement. Si la base est injoignable, la fonction laisse passer l'utilisateur mais se passe de Hardcover.
 
