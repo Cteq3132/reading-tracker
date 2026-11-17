@@ -313,6 +313,8 @@ enum DemoData {
         avec L'Étranger et Caligula le cycle de l'absurde.
         """
     ),
+    // Sans couverture en recherche texte : la recherche par ISBN en trouve une.
+    "9782072958632": BookCandidate(title: "Le Mage du Kremlin", coverUrl: cover("9782072958632")),
     "9782070360024": BookCandidate(
       title: "L'Étranger", publishedDate: "1972-01-05",
       description: """

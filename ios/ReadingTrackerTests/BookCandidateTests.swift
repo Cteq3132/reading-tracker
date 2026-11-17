@@ -58,11 +58,13 @@ struct BookCandidateTests {
     #expect(complete.subtitle == nil && complete.isbn10 == nil)
   }
 
-  @Test func publishedDateFormatting() {
-    #expect(CandidateDetailView.formattedDate("1985-03-12") == "12 mars 1985")
-    #expect(CandidateDetailView.formattedDate("2021-03") == "mars 2021")
-    #expect(CandidateDetailView.formattedDate("1972") == "1972")
-    #expect(CandidateDetailView.formattedDate("") == nil)
-    #expect(CandidateDetailView.languageName("fr") == "Français")
+  @Test func publishedDateAndLanguageFormatting() {
+    func date(_ raw: String) -> String? { BookCandidate(title: "x", publishedDate: raw).formattedPublishedDate }
+    #expect(date("1985-03-12") == "12 mars 1985")
+    #expect(date("2021-03") == "mars 2021")
+    #expect(date("1972") == "1972")
+    #expect(date("") == nil)
+    #expect(BookCandidate(title: "x", language: "fr").languageName == "Français")
+    #expect(BookCandidate(title: "x").languageName == nil)
   }
 }

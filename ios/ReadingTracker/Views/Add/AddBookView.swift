@@ -64,7 +64,9 @@ struct AddBookView: View {
         }
       }
       .navigationDestination(for: BookCandidate.self) { candidate in
-        CandidateDetailView(candidate: candidate)
+        CandidateDetailView(candidate: candidate) { completed in
+          if let index = results.firstIndex(where: { $0.id == completed.id }) { results[index] = completed }
+        }
           // Zoom natif d'iOS 26 : la couverture du résultat s'agrandit jusqu'à la page.
           .navigationTransition(.zoom(sourceID: candidate.id, in: coverNamespace))
       }
