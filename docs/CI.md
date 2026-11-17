@@ -8,9 +8,10 @@ Deux workflows GitHub Actions, dans `.github/workflows/` :
 | `testflight` | chaque push sur `main` (donc chaque PR fusionnée), et à la main | Archive l'app, la signe automatiquement avec une clé d'API App Store Connect, puis l'envoie sur App Store Connect, d'où elle part dans TestFlight. |
 
 Les deux tournent sur l'image GitHub `macos-26` (arm64) avec **Xcode 26.6**, épinglé par
-`xcode-select` (SDK iOS 26.5). C'est la dernière image stable : l'image `xcode-27` (Xcode 27.x)
-est encore en préversion publique. Pour changer de version, modifier `XCODE_VERSION` et
-`runs-on` dans les deux workflows ; la liste des versions installées est dans
+`xcode-select` (SDK iOS 26.5). Leurs étapes communes (Xcode, `Secrets.xcconfig`, paquets SPM)
+sont dans l'action locale `.github/actions/setup-ios`. C'est la dernière image stable : l'image `xcode-27` (Xcode 27.x)
+est encore en préversion publique. Pour changer de version, modifier `xcode-version` dans
+`.github/actions/setup-ios/action.yml`, et `runs-on` dans les deux workflows si l'image change ; la liste des versions installées est dans
 [actions/runner-images](https://github.com/actions/runner-images/tree/main/images/macos).
 Le dépôt étant public, les runners macOS sont gratuits.
 
@@ -89,7 +90,7 @@ est saisie sans écho et passe par l'entrée standard, jamais en argument de com
 for name in ASC_KEY_ID ASC_ISSUER_ID APPLE_TEAM_ID; do printf '%s : ' "$name"; read -rs value; echo; printf '%s' "$value" | gh secret set "$name"; done; unset value
 ```
 
-La clé `.p8`, encodée en base64 (adapter le chemin du fichier téléchargé) :
+La clé `.p8`, encodée en base64 (commande macOS ; adapter le chemin du fichier téléchargé) :
 
 ```bash
 base64 -i ~/Downloads/AuthKey_XXXXXXXXXX.p8 | gh secret set ASC_KEY_P8_BASE64
@@ -105,12 +106,10 @@ Ou, plus simple, en les reprenant du `ios/Config/Secrets.xcconfig` local (à lan
 dossier où ce fichier existe) :
 
 ```bash
-sed -n 's/^SUPABASE_HOST *= *//p' ios/Config/Secrets.xcconfig | tr -d '[:space:]' | gh secret set SUPABASE_HOST
+for name in SUPABASE_HOST SUPABASE_PUBLISHABLE_KEY; do value=$(sed -n "s/^$name *= *//p" ios/Config/Secrets.xcconfig | tr -d '[:space:]'); if [ -n "$value" ]; then printf '%s' "$value" | gh secret set "$name"; else echo "$name absent de ios/Config/Secrets.xcconfig"; fi; done; unset value
 ```
 
-```bash
-sed -n 's/^SUPABASE_PUBLISHABLE_KEY *= *//p' ios/Config/Secrets.xcconfig | tr -d '[:space:]' | gh secret set SUPABASE_PUBLISHABLE_KEY
-```
+La boucle refuse de poser un secret vide, ce que `gh secret set` accepterait sans rien dire.
 
 `SUPABASE_HOST` est l'hôte seul (`abcd.supabase.co`), sans `https://`. Vérifier que les six
 noms sont présents :
@@ -125,7 +124,7 @@ Le fichier `.p8` peut ensuite être rangé dans un gestionnaire de mots de passe
 ### 8. Lancer le premier build
 
 Le workflow `testflight` part tout seul à chaque fusion sur `main`. Pour le lancer à la main
-(une fois les workflows présents sur `main`) :
+(une fois les workflows présents sur `main` ; il refuse toute autre branche) :
 
 ```bash
 gh workflow run testflight --ref main
