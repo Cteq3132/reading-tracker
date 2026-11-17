@@ -112,6 +112,43 @@ struct BookCandidate: Codable, Hashable, Identifiable, Sendable {
   var year: String? { publishedDate.map { String($0.prefix(4)) } }
 }
 
+extension BookCandidate {
+  /// Champs utiles à la page de détail encore vides (le sous-titre et l'ISBN-10 manquent souvent
+  /// pour de bon, ils ne comptent pas) : une recherche par ISBN peut les compléter.
+  var isMissingDetails: Bool {
+    [description, publisher, publishedDate, language, coverUrl].contains { $0?.isEmpty ?? true }
+      || pageCount == nil || authors.isEmpty
+  }
+
+  /// Le candidat complété par `other` (même livre, trouvé par ISBN) : seuls les champs vides
+  /// sont remplis, ceux déjà connus ne bougent pas (la couverture affichée reste la même), sauf
+  /// la date de parution quand `other` la précise.
+  func completed(with other: BookCandidate) -> BookCandidate {
+    func pick(_ current: String?, _ new: String?) -> String? {
+      if let current, !current.isEmpty { return current }
+      return new.flatMap { $0.isEmpty ? nil : $0 } ?? current
+    }
+    var merged = self
+    merged.bookId = bookId ?? other.bookId
+    merged.isbn10 = pick(isbn10, other.isbn10)
+    merged.subtitle = pick(subtitle, other.subtitle)
+    if authors.isEmpty { merged.authors = other.authors }
+    merged.publisher = pick(publisher, other.publisher)
+    // Une date plus précise de la même année (« 1985 » → « 1985-03-12 ») remplace la date connue.
+    if let current = publishedDate, let precise = other.publishedDate,
+       precise.count > current.count, precise.hasPrefix(current) {
+      merged.publishedDate = precise
+    } else {
+      merged.publishedDate = pick(publishedDate, other.publishedDate)
+    }
+    merged.pageCount = pageCount ?? other.pageCount
+    merged.description = pick(description, other.description)
+    merged.language = pick(language, other.language)
+    merged.coverUrl = pick(coverUrl, other.coverUrl)
+    return merged
+  }
+}
+
 struct SearchBooksResponse: Decodable, Sendable {
   let results: [BookCandidate]
 }

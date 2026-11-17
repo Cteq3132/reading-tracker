@@ -20,7 +20,14 @@ final class BookSearchService {
   }
 
   func search(isbn: String) async throws -> [BookCandidate] {
-    if AppConfig.isDemo { return DemoData.search(isbn: isbn) }
+    if AppConfig.isDemo {
+      // Délai d'un appel réseau, pour voir la page de détail s'afficher avant d'être complétée.
+      try await Task.sleep(for: .milliseconds(800))
+      if AppConfig.demoSearch == "ratelimited" {
+        throw FunctionsError.httpError(code: 429, data: Data(#"{"error":"Trop de recherches","retry_after":42}"#.utf8))
+      }
+      return DemoData.search(isbn: isbn)
+    }
     return try await invoke(Body(isbn: isbn))
   }
 

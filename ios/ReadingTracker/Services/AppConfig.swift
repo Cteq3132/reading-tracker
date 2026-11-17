@@ -57,6 +57,27 @@ enum AppConfig {
     #endif
   }()
 
+  /// Variante de la démo pour `search-books` : `-demo-search ratelimited` fait répondre 429
+  /// aux recherches par ISBN (complément de la page de détail, scan).
+  static let demoSearch: String = {
+    #if DEBUG
+    return UserDefaults.standard.string(forKey: "demo-search") ?? "ok"
+    #else
+    return "ok"
+    #endif
+  }()
+
+  /// Recherche lancée au démarrage de la démo, onglet Ajouter ouvert : `-demo-query camus`
+  /// (le simulateur ne permet pas toujours de taper au clavier).
+  static let demoQuery: String? = {
+    #if DEBUG
+    guard isDemo else { return nil }
+    return UserDefaults.standard.string(forKey: "demo-query")
+    #else
+    return nil
+    #endif
+  }()
+
   static let demoStartsSignedOut: Bool = {
     #if DEBUG
     return ProcessInfo.processInfo.arguments.contains("-demo-signed-out")
