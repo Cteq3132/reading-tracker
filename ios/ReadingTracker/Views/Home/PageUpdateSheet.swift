@@ -124,7 +124,6 @@ struct StartReadingSheet: View {
       List {
         Section {
           DatePicker("Commencé le", selection: $startDate, in: ...Date.now, displayedComponents: .date)
-            .environment(\.locale, Locale(identifier: "fr_FR"))
         } footer: {
           Text("Aujourd'hui par défaut. Change la date si tu as commencé plus tôt.")
         }
@@ -179,7 +178,7 @@ struct StartReadingSheet: View {
     startingId = item.id
     defer { startingId = nil }
     var update = UserBookUpdate(item)
-    update.setStatus(.reading, from: item, today: PostgresDate.today())
+    update.status = .reading
     update.startedAt = PostgresDate.day(from: startDate)
     do {
       try await library.save(id: item.id, update: update)

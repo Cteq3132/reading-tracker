@@ -94,16 +94,33 @@ final class LibraryService {
     return item
   }
 
-  /// Enregistre `update` de façon optimiste : la bibliothèque change tout de suite, et revient
-  /// à l'état précédent si le backend refuse (l'erreur est relancée pour être affichée).
+  /// Dernière version acceptée par le backend, pour les lignes dont un enregistrement est en cours.
+  private var confirmed: [UUID: UserBook] = [:]
+  private var pendingSaves: [UUID: Int] = [:]
+
+  /// Enregistre `update` de façon optimiste : la bibliothèque change tout de suite, et revient à la
+  /// dernière version acceptée par le backend s'il refuse (l'erreur est relancée pour être affichée).
+  /// Si un autre enregistrement de la même ligne a eu lieu entre-temps, c'est lui qui décide de l'affichage.
   @discardableResult
   func save(id: UUID, update: UserBookUpdate) async throws -> UserBook {
     guard let index = items.firstIndex(where: { $0.id == id }) else { throw CocoaError(.fileNoSuchFile) }
-    let previous = items[index]
-    let optimistic = previous.applying(update, today: PostgresDate.today())
-    items[index] = optimistic
+    let optimistic = items[index].applying(update, today: PostgresDate.today())
 
-    if AppConfig.isDemo { return optimistic }
+    if AppConfig.isDemo {
+      items[index] = optimistic
+      return optimistic
+    }
+
+    if pendingSaves[id, default: 0] == 0 { confirmed[id] = items[index] }
+    pendingSaves[id, default: 0] += 1
+    items[index] = optimistic
+    defer {
+      pendingSaves[id, default: 1] -= 1
+      if pendingSaves[id] == 0 {
+        pendingSaves[id] = nil
+        confirmed[id] = nil
+      }
+    }
 
     do {
       let saved: UserBook = try await supabase.from("user_books")
@@ -113,15 +130,16 @@ final class LibraryService {
         .single()
         .execute()
         .value
+      confirmed[id] = saved
       replace(id: id, with: saved, ifStillEqualTo: optimistic)
       return saved
     } catch {
-      replace(id: id, with: previous, ifStillEqualTo: optimistic)
+      if let rollback = confirmed[id] { replace(id: id, with: rollback, ifStillEqualTo: optimistic) }
       throw error
     }
   }
 
-  /// Remplace la ligne, sauf si un autre enregistrement l'a modifiée entre-temps.
+  /// Remplace la ligne, sauf si un enregistrement plus récent l'a modifiée entre-temps.
   private func replace(id: UUID, with item: UserBook, ifStillEqualTo expected: UserBook) {
     guard let index = items.firstIndex(where: { $0.id == id }), items[index] == expected else { return }
     items[index] = item
