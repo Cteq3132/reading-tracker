@@ -20,7 +20,9 @@ create table public.rate_limit_settings (
   cost_external int not null,
   hardcover_per_minute int not null check (hardcover_per_minute >= 0),
   hardcover_per_day int not null check (hardcover_per_day >= 0),
-  check (cost_external >= cost_cached)
+  check (cost_external >= cost_cached),
+  -- Sinon une recherche externe serait refusée pour toujours.
+  check (cost_external - cost_cached <= user_per_minute and cost_external <= user_per_day)
 );
 
 -- Unités : une recherche servie par le cache coûte 1, une recherche qui
@@ -48,17 +50,20 @@ revoke all on public.rate_limit_settings from public, anon, authenticated;
 revoke all on public.rate_limit_counters from public, anon, authenticated;
 
 -- Prend p_cost unités dans les fenêtres minute et jour de p_bucket, seulement
--- si les deux restent sous leur plafond. Renvoie 0 si c'est pris, sinon le
--- nombre de secondes avant l'ouverture de la fenêtre pleine (Retry-After).
+-- si les deux restent sous leur plafond. retry_after = 0 si c'est pris, sinon
+-- le nombre de secondes avant l'ouverture de la fenêtre pleine (Retry-After),
+-- et full_window dit laquelle : 'day' si le jour est plein (même si la minute
+-- l'est aussi), sinon 'minute'.
 -- Les deux lignes sont verrouillées dans un ordre fixe : deux appels
 -- concurrents sur le même bucket passent l'un après l'autre.
 create or replace function public.rate_limit_take(
   p_bucket text,
   p_cost int,
   p_per_minute int,
-  p_per_day int
+  p_per_day int,
+  out retry_after int,
+  out full_window text
 )
-returns int
 language plpgsql
 set search_path = ''
 as $$
@@ -69,8 +74,9 @@ declare
   v_minute_hits int;
   v_day_hits int;
 begin
+  retry_after := 0;
   if p_cost <= 0 then
-    return 0;
+    return;
   end if;
 
   insert into public.rate_limit_counters (bucket, period, window_start)
@@ -84,11 +90,15 @@ begin
    where bucket = p_bucket and period = 'day' and window_start = v_day
      for update;
 
-  if v_minute_hits + p_cost > p_per_minute then
-    return greatest(1, ceil(extract(epoch from v_minute + interval '1 minute' - v_now))::int);
-  end if;
   if v_day_hits + p_cost > p_per_day then
-    return greatest(1, ceil(extract(epoch from v_day + interval '1 day' - v_now))::int);
+    full_window := 'day';
+    retry_after := greatest(1, ceil(extract(epoch from v_day + interval '1 day' - v_now))::int);
+    return;
+  end if;
+  if v_minute_hits + p_cost > p_per_minute then
+    full_window := 'minute';
+    retry_after := greatest(1, ceil(extract(epoch from v_minute + interval '1 minute' - v_now))::int);
+    return;
   end if;
 
   update public.rate_limit_counters set hits = hits + p_cost
@@ -99,8 +109,6 @@ begin
   if random() < 0.01 then
     delete from public.rate_limit_counters where window_start < v_now - interval '2 days';
   end if;
-
-  return 0;
 end;
 $$;
 
@@ -108,15 +116,17 @@ $$;
 --   p_step = 'request'  : à chaque appel (coût cost_cached) ;
 --   p_step = 'external' : avant d'interroger les sources (complément jusqu'à
 --                         cost_external).
--- Renvoie 0 si l'appel peut continuer, sinon le délai Retry-After en secondes.
+-- Renvoie { "retry_after": 0 } si l'appel peut continuer, sinon
+-- { "retry_after": <secondes>, "window": "minute" | "day" }.
 create or replace function public.search_books_rate_limit(p_user uuid, p_step text)
-returns int
+returns jsonb
 language plpgsql
 set search_path = ''
 as $$
 declare
   s public.rate_limit_settings;
   v_cost int;
+  r record;
 begin
   if p_user is null then
     raise exception 'search_books_rate_limit: utilisateur requis' using errcode = '22023';
@@ -129,7 +139,8 @@ begin
   if v_cost is null then
     raise exception 'search_books_rate_limit: étape inconnue « % »', p_step using errcode = '22023';
   end if;
-  return public.rate_limit_take('user:' || p_user, v_cost, s.user_per_minute, s.user_per_day);
+  select * into r from public.rate_limit_take('user:' || p_user, v_cost, s.user_per_minute, s.user_per_day);
+  return jsonb_strip_nulls(jsonb_build_object('retry_after', r.retry_after, 'window', r.full_window));
 end;
 $$;
 
@@ -144,7 +155,8 @@ declare
   s public.rate_limit_settings;
 begin
   select * into strict s from public.rate_limit_settings;
-  return public.rate_limit_take('hardcover', 1, s.hardcover_per_minute, s.hardcover_per_day) = 0;
+  return (select t.retry_after = 0
+            from public.rate_limit_take('hardcover', 1, s.hardcover_per_minute, s.hardcover_per_day) t);
 end;
 $$;
 
@@ -154,5 +166,7 @@ revoke all on function public.hardcover_take() from public, anon, authenticated;
 grant execute on function public.rate_limit_take(text, int, int, int) to service_role;
 grant execute on function public.search_books_rate_limit(uuid, text) to service_role;
 grant execute on function public.hardcover_take() to service_role;
+-- service_role a déjà tous les droits sur les tables (privilèges par défaut de
+-- Supabase) ; on les rend explicites pour les compteurs et les seuils.
 grant select, insert, update, delete on public.rate_limit_counters to service_role;
 grant select, update on public.rate_limit_settings to service_role;
