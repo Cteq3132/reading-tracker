@@ -1,7 +1,8 @@
-# reading-tracker
+# Unshelf
 
-App iOS (SwiftUI, Liquid Glass) de suivi de lectures : lectures en cours, PAL, livres lus,
-et un volet social pour suivre ses amis. Backend Supabase.
+App iOS (SwiftUI, Liquid Glass) qui aide à faire baisser sa PAL (pile à lire) : suivre ce qui
+entre et ce qui sort, piocher sa prochaine lecture, se fixer un objectif, et voir les progrès de
+ses amis. Backend Supabase. Le dépôt garde le nom technique `reading-tracker`.
 
 Le contrat entre le backend et l'app est dans [docs/CONTRAT.md](docs/CONTRAT.md).
 
