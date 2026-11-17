@@ -16,9 +16,6 @@ concurrency:
   group: testflight
   cancel-in-progress: false
 
-env:
-  XCODE_VERSION: "26.6"
-
 jobs:
   preflight:
     name: Vérifier les secrets
@@ -26,6 +23,7 @@ jobs:
     outputs:
       ready: ${{ steps.check.outputs.ready }}
     steps:
+      # Seule main est envoyée, même en lancement manuel.
       # Sur push, un secret manquant saute l'envoi avec un avertissement (main reste vert tant
       # que le compte Apple n'est pas prêt). En lancement manuel, il fait échouer le job.
       - id: check
@@ -37,7 +35,12 @@ jobs:
           SUPABASE_HOST: ${{ secrets.SUPABASE_HOST }}
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
           EVENT_NAME: ${{ github.event_name }}
+          GIT_REF: ${{ github.ref }}
         run: |
+          if [[ "$GIT_REF" != "refs/heads/main" ]]; then
+            echo "::error::TestFlight ne part que depuis main (lancé sur $GIT_REF)."
+            exit 1
+          fi
           missing=()
           for name in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8_BASE64 APPLE_TEAM_ID SUPABASE_HOST SUPABASE_PUBLISHABLE_KEY; do
             [[ -n "${!name}" ]] || missing+=("$name")
@@ -68,32 +71,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Sélectionner Xcode
-        run: |
-          sudo xcode-select --switch "/Applications/Xcode_${XCODE_VERSION}.app"
-          xcodebuild -version
-
-      - name: Générer Secrets.xcconfig
-        env:
-          SUPABASE_HOST: ${{ secrets.SUPABASE_HOST }}
-          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
-        run: .github/scripts/write-secrets-xcconfig.sh
-
-      - name: Cache des paquets SPM
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: ./.github/actions/setup-ios
         with:
-          path: ${{ runner.temp }}/SourcePackages
-          key: spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-${{ hashFiles('ios/ReadingTracker.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
-          restore-keys: |
-            spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-
-
-      - name: Résoudre les dépendances SPM
-        run: |
-          xcodebuild -resolvePackageDependencies \
-            -project ios/ReadingTracker.xcodeproj \
-            -scheme ReadingTracker \
-            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
-            -onlyUsePackageVersionsFromResolvedFile
+          supabase-host: ${{ secrets.SUPABASE_HOST }}
+          supabase-publishable-key: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
 
       # La clé est décodée dans $RUNNER_TEMP (vidé à la fin du job) et supprimée par la
       # dernière étape, même en cas d'échec. Elle n'est jamais affichée.

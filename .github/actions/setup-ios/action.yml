@@ -1,0 +1,60 @@
+# Préparation commune aux workflows iOS : version d'Xcode, Secrets.xcconfig, paquets SPM.
+# Les paquets sont résolus dans $RUNNER_TEMP/SourcePackages : passer ce dossier à xcodebuild
+# avec -clonedSourcePackagesDirPath.
+name: Préparer le build iOS
+description: Sélectionne Xcode, génère Secrets.xcconfig et résout les paquets SPM avec cache.
+
+inputs:
+  xcode-version:
+    description: Version d'Xcode installée sur l'image (/Applications/Xcode_<version>.app).
+    default: "26.6"
+  supabase-host:
+    description: Secret SUPABASE_HOST.
+    required: true
+  supabase-publishable-key:
+    description: Secret SUPABASE_PUBLISHABLE_KEY.
+    required: true
+  allow-placeholder-secrets:
+    description: "true : des valeurs factices remplacent les secrets Supabase absents."
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Sélectionner Xcode
+      shell: bash
+      env:
+        XCODE_VERSION: ${{ inputs.xcode-version }}
+      run: |
+        sudo xcode-select --switch "/Applications/Xcode_${XCODE_VERSION}.app"
+        xcodebuild -version
+
+    - name: Générer Secrets.xcconfig
+      shell: bash
+      env:
+        SUPABASE_HOST: ${{ inputs.supabase-host }}
+        SUPABASE_PUBLISHABLE_KEY: ${{ inputs.supabase-publishable-key }}
+        ALLOW_PLACEHOLDER: ${{ inputs.allow-placeholder-secrets }}
+      run: |
+        if [[ "$ALLOW_PLACEHOLDER" == "true" ]]; then
+          .github/scripts/write-secrets-xcconfig.sh --allow-placeholder
+        else
+          .github/scripts/write-secrets-xcconfig.sh
+        fi
+
+    - name: Cache des paquets SPM
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/SourcePackages
+        key: spm-${{ runner.os }}-xcode${{ inputs.xcode-version }}-${{ hashFiles('ios/ReadingTracker.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+        restore-keys: |
+          spm-${{ runner.os }}-xcode${{ inputs.xcode-version }}-
+
+    - name: Résoudre les dépendances SPM
+      shell: bash
+      run: |
+        xcodebuild -resolvePackageDependencies \
+          -project ios/ReadingTracker.xcodeproj \
+          -scheme ReadingTracker \
+          -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+          -onlyUsePackageVersionsFromResolvedFile

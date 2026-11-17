@@ -1,5 +1,5 @@
 # Compile l'app pour le simulateur, sans signature, sur chaque PR et chaque push sur main.
-# Image et version d'Xcode : voir docs/CI.md.
+# Image et version d'Xcode : voir docs/CI.md (la version est dans .github/actions/setup-ios).
 name: ios-build
 
 on:
@@ -14,9 +14,6 @@ concurrency:
   group: ios-build-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  XCODE_VERSION: "26.6"
-
 jobs:
   build:
     name: Build (simulateur)
@@ -27,34 +24,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Sélectionner Xcode
-        run: |
-          sudo xcode-select --switch "/Applications/Xcode_${XCODE_VERSION}.app"
-          xcodebuild -version
-
-      # Les secrets sont vides sur une PR venant d'un fork : le script passe alors à des
-      # valeurs factices, suffisantes pour compiler.
-      - name: Générer Secrets.xcconfig
-        env:
-          SUPABASE_HOST: ${{ secrets.SUPABASE_HOST }}
-          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
-        run: .github/scripts/write-secrets-xcconfig.sh --allow-placeholder
-
-      - name: Cache des paquets SPM
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Les secrets sont vides sur une PR venant d'un fork : des valeurs factices les
+      # remplacent, suffisantes pour compiler.
+      - uses: ./.github/actions/setup-ios
         with:
-          path: ${{ runner.temp }}/SourcePackages
-          key: spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-${{ hashFiles('ios/ReadingTracker.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
-          restore-keys: |
-            spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-
-
-      - name: Résoudre les dépendances SPM
-        run: |
-          xcodebuild -resolvePackageDependencies \
-            -project ios/ReadingTracker.xcodeproj \
-            -scheme ReadingTracker \
-            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
-            -onlyUsePackageVersionsFromResolvedFile
+          supabase-host: ${{ secrets.SUPABASE_HOST }}
+          supabase-publishable-key: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          allow-placeholder-secrets: "true"
 
       - name: Compiler pour le simulateur
         run: |
