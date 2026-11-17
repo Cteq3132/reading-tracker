@@ -447,16 +447,27 @@ def section_rate_limits():
     cache_age = ("select extract(epoch from now() - created_at)::int as age from public.search_cache "
                  f"where query_key = '{hc_key}'")
     cap = settings["hardcover_per_day"]
+
+    def search_until_cached():
+        """Une source lente (Open Library frôle parfois son délai de 6 s) rend le
+        résultat incomplet, donc non mis en cache : jusqu'à 3 essais."""
+        for attempt in range(3):
+            status, _, res = call_raw(B["token"], hc_query)
+            results = res.get("results", []) if isinstance(res, dict) else []
+            age = [r["age"] for r in sql(cache_age)]
+            if age or status != 200:
+                break
+            print(f"   essai {attempt + 1} : résultat non mis en cache (source lente), on recommence")
+        return status, res, results, age
+
     sql(f"delete from public.search_cache where query_key = '{hc_key}'", write=True)
     sql("insert into public.rate_limit_counters (bucket, period, window_start, hits) "
         f"values ('hardcover', 'day', '{day}'::timestamptz, {cap}) "
         f"on conflict (bucket, period, window_start) do update set hits = rate_limit_counters.hits + {cap}", write=True)
     try:
         before = sql(hc_count)[0]["n"]
-        status, _, res = call_raw(B["token"], hc_query)
-        results = res.get("results", []) if isinstance(res, dict) else []
+        status, res, results, age = search_until_cached()
         after = sql(hc_count)[0]["n"]
-        age = [r["age"] for r in sql(cache_age)]
         print(f"plafond Hardcover atteint → HTTP {status}, {len(results)} résultats, sources",
               sorted({r["source"] for r in results}), f"compteur {before} → {after}, âge en cache : {age}")
         check("plafond Hardcover atteint : recherche 200 avec résultats, sans Hardcover ni appel sortant compté",
@@ -468,9 +479,7 @@ def section_rate_limits():
     finally:
         sql(f"update public.rate_limit_counters set hits = greatest(hits - {cap}, 0) where {hc_row}", write=True)
         sql(f"delete from public.search_cache where query_key = '{hc_key}'", write=True)
-    status, _, res = call_raw(B["token"], hc_query)
-    results = res.get("results", []) if isinstance(res, dict) else []
-    age = [r["age"] for r in sql(cache_age)]
+    status, res, results, age = search_until_cached()
     check("plafond Hardcover rendu : Hardcover revient et le résultat est gardé 30 jours en cache",
           status == 200 and any(r["source"] == "hardcover" for r in results) and len(age) == 1 and age[0] < 600,
           f"HTTP {status} sources {sorted({r['source'] for r in results})} âge {age}")
