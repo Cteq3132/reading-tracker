@@ -72,7 +72,7 @@ struct MainTabView: View {
   @Environment(LibraryService.self) private var library
   @Environment(SocialService.self) private var social
   @Environment(PALService.self) private var pal
-  @State private var selection: AppTab = .home
+  @State private var selection: AppTab = AppConfig.demoQuery == nil ? .home : .add
 
   var body: some View {
     TabView(selection: $selection) {

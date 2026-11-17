@@ -16,19 +16,22 @@ struct AddBookView: View {
   @State private var confirmation: String?
   @State private var confirmationTask: Task<Void, Never>?
   @State private var searchTask: Task<Void, Never>?
+  @State private var path = NavigationPath()
+  @Namespace private var coverNamespace
 
   var body: some View {
-    NavigationStack {
+    NavigationStack(path: $path) {
       List {
         ForEach(results) { candidate in
           CandidateRow(
             candidate: candidate,
             existingStatus: library.existing(for: candidate)?.status,
             palSize: library.toReadCount,
-            isAdding: adding == candidate.id
-          ) { status in
-            Task { await add(candidate, status: status) }
-          }
+            isAdding: adding == candidate.id,
+            coverNamespace: coverNamespace,
+            onOpen: { path.append(candidate) },
+            onAdd: { status in Task { await add(candidate, status: status) } }
+          )
           .listSectionSeparator(.hidden, edges: .top)
         }
       }
@@ -60,7 +63,20 @@ struct AddBookView: View {
           runSearch(isbn)
         }
       }
+      .navigationDestination(for: BookCandidate.self) { candidate in
+        CandidateDetailView(candidate: candidate)
+          // Zoom natif d'iOS 26 : la couverture du résultat s'agrandit jusqu'à la page.
+          .navigationTransition(.zoom(sourceID: candidate.id, in: coverNamespace))
+      }
+      .navigationDestination(for: UserBook.ID.self) { id in
+        BookDetailView(userBookId: id)
+      }
       .errorAlert($errorMessage)
+      .task {
+        guard let demoQuery = AppConfig.demoQuery, query.isEmpty else { return }
+        query = demoQuery
+        runSearch(demoQuery)
+      }
       .overlay(alignment: .bottom) {
         if let confirmation {
           Label(confirmation, systemImage: "checkmark.circle.fill")
@@ -157,54 +173,55 @@ private struct CandidateRow: View {
   /// Taille actuelle de la PAL, rappelée discrètement sous le choix « PAL ».
   let palSize: Int
   let isAdding: Bool
+  /// Espace de noms du zoom vers la page de détail : la couverture en est la source.
+  let coverNamespace: Namespace.ID
+  let onOpen: () -> Void
   let onAdd: (ReadingStatus) -> Void
 
   var body: some View {
     HStack(alignment: .center, spacing: 14) {
-      BookCover(url: candidate.coverURL, title: candidate.title, author: candidate.authorsLine, cornerRadius: 5)
-        .frame(width: 52)
-        .shadow(color: .black.opacity(0.12), radius: 3, y: 2)
-
-      VStack(alignment: .leading, spacing: 3) {
-        Text(candidate.title)
-          .font(.subheadline.weight(.semibold))
-          .lineLimit(2)
-        if !candidate.authors.isEmpty {
-          Text(candidate.authorsLine)
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-        }
-        Text(details)
-          .font(.caption)
-          .foregroundStyle(.tertiary)
-          .lineLimit(1)
-        if let existingStatus {
-          HStack(spacing: 4) {
-            Image(systemName: "checkmark")
-            Text(existingStatus.singularLabel)
-          }
-          .font(.caption.weight(.medium))
-          .foregroundStyle(.tint)
-          .padding(.top, 2)
-        }
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-
-      Menu {
-        Section(existingStatus == nil ? "Ajouter à" : "Déplacer vers") {
-          ForEach(ReadingStatus.addChoices) { status in
-            Button {
-              onAdd(status)
-            } label: {
-              Image(systemName: status.systemImage)
-              Text(status.singularLabel)
-              Text(hint(for: status))
+      // Couverture et textes ouvrent la page de détail ; le menu d'ajout reste un contrôle à part.
+      Button(action: onOpen) {
+        HStack(alignment: .center, spacing: 14) {
+          BookCover(url: candidate.coverURL, title: candidate.title, author: candidate.authorsLine, cornerRadius: 5)
+            .frame(width: 52)
+            .matchedTransitionSource(id: candidate.id, in: coverNamespace) { source in
+              source.clipShape(.rect(cornerRadius: 5))
             }
-            .disabled(status == existingStatus)
+            .shadow(color: .black.opacity(0.12), radius: 3, y: 2)
+
+          VStack(alignment: .leading, spacing: 3) {
+            Text(candidate.title)
+              .font(.subheadline.weight(.semibold))
+              .lineLimit(2)
+            if !candidate.authors.isEmpty {
+              Text(candidate.authorsLine)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+            Text(details)
+              .font(.caption)
+              .foregroundStyle(.tertiary)
+              .lineLimit(1)
+            if let existingStatus {
+              HStack(spacing: 4) {
+                Image(systemName: "checkmark")
+                Text(existingStatus.singularLabel)
+              }
+              .font(.caption.weight(.medium))
+              .foregroundStyle(.tint)
+              .padding(.top, 2)
+            }
           }
+          .frame(maxWidth: .infinity, alignment: .leading)
         }
-      } label: {
+        .contentShape(.rect)
+      }
+      .buttonStyle(.plain)
+      .accessibilityHint("Ouvre la fiche du livre")
+
+      AddStatusMenu(existingStatus: existingStatus, palSize: palSize, onSelect: onAdd) {
         Group {
           if isAdding {
             ProgressView()
@@ -221,12 +238,6 @@ private struct CandidateRow: View {
       .accessibilityLabel(existingStatus == nil ? "Ajouter" : "Changer le statut")
     }
     .padding(.vertical, 4)
-  }
-
-  /// Sous-titre du choix : précision du statut, et pour la PAL, sa taille actuelle.
-  private func hint(for status: ReadingStatus) -> String {
-    guard status == .toRead, existingStatus != .toRead else { return status.addHint }
-    return "Je l'ai · ta PAL compte \(palSize) livre\(palSize > 1 ? "s" : "")"
   }
 
   private var details: String {

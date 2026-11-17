@@ -70,6 +70,9 @@ enum DemoData {
                   pageCount: 274, language: "fr", source: "bnf", sourceId: "demo-10"),
     BookCandidate(title: "Da Vinci Code", authors: ["Dan Brown"], publisher: "Pocket", publishedDate: "2005",
                   pageCount: 574, language: "fr", source: "google", sourceId: "demo-11"),
+    BookCandidate(isbn13: "9782070322886", title: "Le Mythe de Sisyphe", authors: ["Albert Camus"],
+                  publisher: "Gallimard", publishedDate: "1985", language: "fr",
+                  coverUrl: cover("9782070322886"), source: "google", sourceId: "demo-15"),
     BookCandidate(title: "La Chute", authors: ["Albert Camus"], publisher: "Folio", publishedDate: "1972",
                   pageCount: 153, language: "fr", source: "bnf", sourceId: "demo-12"),
     BookCandidate(title: "Noces suivi de L'Été", authors: ["Albert Camus"], publisher: "Folio", publishedDate: "1972",
@@ -284,7 +287,39 @@ enum DemoData {
     }
   }
 
+  /// Recherche par ISBN : comme en vrai, elle renvoie une fiche plus complète que la recherche texte
+  /// (résumé, date précise, pages), ce qui permet de voir la page de détail se compléter.
   static func search(isbn: String) -> [BookCandidate] {
-    candidates.filter { $0.isbn13 == isbn || $0.isbn10 == isbn }
+    candidates.filter { $0.isbn13 == isbn || $0.isbn10 == isbn }.map { candidate in
+      guard let isbn13 = candidate.isbn13, let extra = isbnDetails[isbn13] else { return candidate }
+      return candidate.completed(with: extra)
+    }
   }
+
+  private static let isbnDetails: [String: BookCandidate] = [
+    "9782070322886": BookCandidate(
+      title: "Le Mythe de Sisyphe", subtitle: "Essai sur l'absurde", publishedDate: "1985-03-12", pageCount: 192,
+      description: """
+        Il n'y a qu'un problème philosophique vraiment sérieux : juger si la vie vaut ou ne vaut pas la peine \
+        d'être vécue. Camus part de ce constat pour décrire le sentiment de l'absurde, ce divorce entre \
+        l'homme qui cherche un sens et un monde qui se tait.
+
+        Plutôt que de fuir dans l'espoir ou dans le suicide, il propose de tenir les deux bouts : la lucidité \
+        et la révolte. Don Juan, le comédien, le conquérant et le créateur sont autant de figures d'une vie \
+        vécue sans appel, tout entière tournée vers le présent.
+
+        L'essai se clôt sur Sisyphe, condamné à rouler éternellement son rocher. Conscient de son sort, il \
+        le dépasse : « Il faut imaginer Sisyphe heureux. » Un texte court et dense, écrit en 1942, qui forme \
+        avec L'Étranger et Caligula le cycle de l'absurde.
+        """
+    ),
+    "9782070360024": BookCandidate(
+      title: "L'Étranger", publishedDate: "1972-01-05",
+      description: """
+        « Aujourd'hui, maman est morte. » Meursault, employé de bureau à Alger, enterre sa mère sans larmes, \
+        puis reprend sa vie au soleil. Un après-midi sur la plage, il tue un homme. Son procès juge moins son \
+        geste que son indifférence.
+        """
+    ),
+  ]
 }
