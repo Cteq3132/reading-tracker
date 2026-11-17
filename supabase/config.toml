@@ -174,20 +174,30 @@ minimum_password_length = 6
 password_requirements = ""
 
 [auth.rate_limit]
+# Valeurs resserrées pour une petite app entre amis (docs/CONTRAT.md, « Limites de débit »).
+# Les limites « par IP » visent un script ; une famille derrière la même box reste loin du plafond.
 # Number of emails that can be sent per hour. Requires auth.email.smtp to be enabled.
+# Sans SMTP personnalisé, Supabase impose 2/h et ignore cette valeur (non comparée par config push).
 email_sent = 2
 # Number of SMS messages that can be sent per hour. Requires auth.sms to be enabled.
-sms_sent = 30
+# SMS désactivés : plafond minimal par prudence.
+sms_sent = 5
 # Number of anonymous sign-ins that can be made per hour per IP address. Requires enable_anonymous_sign_ins = true.
-anonymous_users = 30
+# Connexion anonyme désactivée : plafond minimal par prudence.
+anonymous_users = 5
 # Number of sessions that can be refreshed in a 5 minute interval per IP address.
-token_refresh = 150
+# Une session se rafraîchit environ une fois par heure : 30 couvre largement quelques appareils.
+token_refresh = 30
 # Number of sign up and sign-in requests that can be made in a 5 minute interval per IP address (excludes anonymous users).
-sign_in_sign_ups = 30
+# Inscriptions et connexions confondues : 10 par 5 min laisse quelques fautes de mot de passe,
+# et ralentit la création de comptes en masse ou le test de mots de passe.
+sign_in_sign_ups = 10
 # Number of OTP / Magic link verifications that can be made in a 5 minute interval per IP address.
-token_verifications = 30
+# Ni OTP ni lien magique dans l'app (confirmation d'email désactivée).
+token_verifications = 10
 # Number of Web3 logins that can be made in a 5 minute interval per IP address.
-web3 = 30
+# Web3 désactivé : plafond minimal par prudence.
+web3 = 5
 
 # Configure one of the supported captcha providers: `hcaptcha`, `turnstile`.
 # [auth.captcha]
