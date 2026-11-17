@@ -39,6 +39,24 @@ enum AppConfig {
     #endif
   }()
 
+  /// Variante de la démo pour l'objectif PAL : `-demo-goal none` démarre sans objectif.
+  static let demoGoal: String = {
+    #if DEBUG
+    return UserDefaults.standard.string(forKey: "demo-goal") ?? "set"
+    #else
+    return "set"
+    #endif
+  }()
+
+  /// Variante de la démo pour la PAL : `-demo-pal empty` démarre avec une PAL vide.
+  static let demoPAL: String = {
+    #if DEBUG
+    return UserDefaults.standard.string(forKey: "demo-pal") ?? "full"
+    #else
+    return "full"
+    #endif
+  }()
+
   static let demoStartsSignedOut: Bool = {
     #if DEBUG
     return ProcessInfo.processInfo.arguments.contains("-demo-signed-out")

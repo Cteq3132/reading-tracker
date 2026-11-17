@@ -275,7 +275,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Config/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "reading-tracker";
+				INFOPLIST_KEY_CFBundleDisplayName = Unshelf;
 				INFOPLIST_KEY_NSCameraUsageDescription = "La caméra sert à scanner le code-barres ISBN d'un livre pour l'ajouter à ta bibliothèque.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -306,7 +306,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Config/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "reading-tracker";
+				INFOPLIST_KEY_CFBundleDisplayName = Unshelf;
 				INFOPLIST_KEY_NSCameraUsageDescription = "La caméra sert à scanner le code-barres ISBN d'un livre pour l'ajouter à ta bibliothèque.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
