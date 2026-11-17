@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Seul le chiffrement fourni par le système est utilisé (HTTPS via URLSession, hachage
+	     SHA-256 du PKCE de supabase-swift) : exempté de documentation d'export. Voir docs/CI.md. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>SupabaseHost</key>
 	<string>$(SUPABASE_HOST)</string>
 	<key>SupabasePublishableKey</key>

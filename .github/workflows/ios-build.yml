@@ -1,0 +1,69 @@
+# Compile l'app pour le simulateur, sans signature, sur chaque PR et chaque push sur main.
+# Image et version d'Xcode : voir docs/CI.md.
+name: ios-build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  XCODE_VERSION: "26.6"
+
+jobs:
+  build:
+    name: Build (simulateur)
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Sélectionner Xcode
+        run: |
+          sudo xcode-select --switch "/Applications/Xcode_${XCODE_VERSION}.app"
+          xcodebuild -version
+
+      # Les secrets sont vides sur une PR venant d'un fork : le script passe alors à des
+      # valeurs factices, suffisantes pour compiler.
+      - name: Générer Secrets.xcconfig
+        env:
+          SUPABASE_HOST: ${{ secrets.SUPABASE_HOST }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: .github/scripts/write-secrets-xcconfig.sh --allow-placeholder
+
+      - name: Cache des paquets SPM
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/SourcePackages
+          key: spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-${{ hashFiles('ios/ReadingTracker.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-
+
+      - name: Résoudre les dépendances SPM
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project ios/ReadingTracker.xcodeproj \
+            -scheme ReadingTracker \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -onlyUsePackageVersionsFromResolvedFile
+
+      - name: Compiler pour le simulateur
+        run: |
+          xcodebuild build \
+            -project ios/ReadingTracker.xcodeproj \
+            -scheme ReadingTracker \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGNING_ALLOWED=NO

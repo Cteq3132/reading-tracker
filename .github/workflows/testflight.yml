@@ -1,0 +1,154 @@
+# Archive l'app, la signe automatiquement avec une clé d'API App Store Connect et l'envoie
+# sur TestFlight. Se lance à chaque push sur main (PR fusionnée) et à la main.
+# Prérequis côté Apple et secrets à poser : docs/CI.md.
+name: testflight
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Deux envois ne doivent pas se chevaucher ; aucun n'est annulé en cours de route.
+concurrency:
+  group: testflight
+  cancel-in-progress: false
+
+env:
+  XCODE_VERSION: "26.6"
+
+jobs:
+  preflight:
+    name: Vérifier les secrets
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      # Sur push, un secret manquant saute l'envoi avec un avertissement (main reste vert tant
+      # que le compte Apple n'est pas prêt). En lancement manuel, il fait échouer le job.
+      - id: check
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          SUPABASE_HOST: ${{ secrets.SUPABASE_HOST }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          missing=()
+          for name in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8_BASE64 APPLE_TEAM_ID SUPABASE_HOST SUPABASE_PUBLISHABLE_KEY; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} == 0 )); then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+          msg="Secrets manquants : ${missing[*]}. Les poser avec gh secret set (voir docs/CI.md)."
+          printf '### Envoi TestFlight non lancé\n\n%s\n' "$msg" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "::error::$msg"
+            exit 1
+          fi
+          echo "::warning::$msg Envoi sauté."
+
+  upload:
+    name: Archiver et envoyer sur TestFlight
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      BUILD_NUMBER: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Sélectionner Xcode
+        run: |
+          sudo xcode-select --switch "/Applications/Xcode_${XCODE_VERSION}.app"
+          xcodebuild -version
+
+      - name: Générer Secrets.xcconfig
+        env:
+          SUPABASE_HOST: ${{ secrets.SUPABASE_HOST }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: .github/scripts/write-secrets-xcconfig.sh
+
+      - name: Cache des paquets SPM
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/SourcePackages
+          key: spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-${{ hashFiles('ios/ReadingTracker.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-
+
+      - name: Résoudre les dépendances SPM
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project ios/ReadingTracker.xcodeproj \
+            -scheme ReadingTracker \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -onlyUsePackageVersionsFromResolvedFile
+
+      # La clé est décodée dans $RUNNER_TEMP (vidé à la fin du job) et supprimée par la
+      # dernière étape, même en cas d'échec. Elle n'est jamais affichée.
+      - name: Installer la clé d'API App Store Connect
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: |
+          umask 077
+          key_path="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
+          printf '%s' "$ASC_KEY_P8_BASE64" | tr -d ' \t\r\n' | base64 --decode > "$key_path" 2>/dev/null || true
+          if ! grep -q -- '-----BEGIN PRIVATE KEY-----' "$key_path"; then
+            rm -f "$key_path"
+            echo "::error::ASC_KEY_P8_BASE64 ne se décode pas en clé .p8 : le poser avec « base64 -i AuthKey_XXXX.p8 » (voir docs/CI.md)."
+            exit 1
+          fi
+          echo "ASC_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Archiver
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcodebuild archive \
+            -project ios/ReadingTracker.xcodeproj \
+            -scheme ReadingTracker \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/ReadingTracker.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
+
+      - name: Exporter et envoyer sur App Store Connect
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/ReadingTracker.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist ios/ExportOptions.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          printf '### Build %s envoyé sur App Store Connect\n\nIl apparaît dans TestFlight une fois le traitement Apple terminé.\n' "$BUILD_NUMBER" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Supprimer la clé d'API
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8
