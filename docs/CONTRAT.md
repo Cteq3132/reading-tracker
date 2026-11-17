@@ -29,14 +29,22 @@ Toute évolution du schéma ou de l'API se fait ici d'abord.
 | display_name | text | |
 | avatar_url | text | |
 | is_private | bool default false | privé ⇒ les follows passent par une demande |
-| pal_goal_target | int | taille de PAL visée, nullable (pas d'objectif) ; ≥ 0 |
-| pal_goal_deadline | date | échéance de l'objectif, nullable |
-| pal_goal_start_size | int | taille de la PAL quand l'objectif a été fixé, posée par trigger (à ne pas envoyer) |
-| pal_goal_set_at | timestamptz | posé par trigger quand `pal_goal_target` change |
 | created_at | timestamptz | |
 
 RLS : lecture pour tout utilisateur connecté ; mise à jour de sa propre ligne seulement.
-Objectif PAL : l'app écrit `pal_goal_target` et `pal_goal_deadline` (ou les remet à `null`). Quand `pal_goal_target` change, un trigger pose `pal_goal_start_size` (nombre de `user_books` du compte en `to_read` à cet instant) et `pal_goal_set_at = now()`. Progression = `(start_size − taille actuelle) / (start_size − target)`, bornée à [0, 1].
+
+### `pal_goals` — objectif PAL, privé
+| colonne | type | note |
+|---|---|---|
+| user_id | uuid PK default `auth.uid()` | FK profiles, cascade |
+| target | int not null | taille de PAL visée ; ≥ 0 |
+| deadline | date | échéance, nullable |
+| start_size | int not null | taille de la PAL quand l'objectif a été fixé, posée par trigger (à ne pas envoyer) |
+| set_at | timestamptz not null | posé par trigger (à ne pas envoyer) |
+
+Pas de ligne = pas d'objectif : l'app insère la ligne pour fixer un objectif et la supprime pour le retirer.
+L'app écrit `target` et `deadline` (insertion, mise à jour, ou upsert : `POST` avec `Prefer: resolution=merge-duplicates` et un corps qui contient `user_id`) ; envoyer `start_size` ou `set_at` est refusé (403). À l'insertion, et quand `target` change, un trigger pose `start_size` (nombre de `user_books` du compte en `to_read` à cet instant) et `set_at = now()` ; changer seulement `deadline`, ou renvoyer la même cible, ne les touche pas. Progression = `(start_size − taille actuelle) / (start_size − target)`, bornée à [0, 1].
+RLS : le propriétaire seul lit, crée, modifie et supprime sa ligne. L'objectif n'est visible de personne d'autre, même d'un abonné ou si le profil est public.
 
 ### `books` — cache partagé des fiches
 | colonne | type | note |

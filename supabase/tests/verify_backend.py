@@ -15,7 +15,7 @@ les compteurs dans la base avec `supabase db query --remote` (CLI connectée au
 compte qui possède le projet), puis les remet en état.
 
 Unshelf : entrées et sorties de PAL dans user_book_events, status_changed_at,
-droits de lecture des événements, objectif PAL et reprise de l'existant.
+droits de lecture des événements, objectif PAL privé (pal_goals) et reprise de l'existant.
 
 ENV_LOCAL permet de désigner un autre fichier que .env.local à la racine.
 """
@@ -114,7 +114,8 @@ if all(f"TEST_USER_{w}_EMAIL" in existing for w in "AB"):
     for acc in (A, B):
         call("DELETE", f"/rest/v1/user_books?user_id=eq.{acc['id']}", acc["token"])
         call("PATCH", f"/rest/v1/profiles?id=eq.{acc['id']}", acc["token"],
-             {"is_private": False, "pal_goal_target": None, "pal_goal_deadline": None})
+             {"is_private": False})
+        call("DELETE", f"/rest/v1/pal_goals?user_id=eq.{acc['id']}", acc["token"])
     print("Comptes A et B réutilisés, données remises à zéro.")
 
 suffix = locals().get("suffix") or secrets.token_hex(3)
@@ -461,43 +462,82 @@ def section_unshelf_rest():
                        headers={"Prefer": "return=representation"})
     check("suppression directe d'un événement refusée, même le sien", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
 
-    # Objectif PAL. A a une PAL de 1 livre ici (le Yoga est passé en reading) : on
-    # en ajoute un pour que la taille de départ ne soit pas un hasard.
+    # Objectif PAL, table pal_goals privée. A a une PAL de 1 livre ici (le Yoga
+    # est passé en reading) : on en ajoute un pour que la taille de départ ne
+    # soit pas un hasard.
+    goal_path = f"/rest/v1/pal_goals?user_id=eq.{A['id']}"
+    check("pas d'objectif au départ (aucune ligne)", rows(goal_path + "&select=*", A["token"]) == [])
     status, res = call("POST", "/rest/v1/user_books", A["token"], {"book_id": test_id, "status": "to_read"},
                        {"Prefer": "return=representation"})
-    status, pal = call("GET", f"/rest/v1/user_books?user_id=eq.{A['id']}&status=eq.to_read&select=id", A["token"])
-    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"],
-                       {"pal_goal_target": 0, "pal_goal_deadline": "2027-06-30"}, {"Prefer": "return=representation"})
-    goal = res[0] if status == 200 and res else {}
-    print(f"objectif de A (PAL de {len(pal)}) :",
-          show({k: v for k, v in goal.items() if k.startswith("pal_goal")}))
-    check("objectif PAL : start_size = taille de la PAL, set_at posé, échéance gardée",
-          goal.get("pal_goal_target") == 0 and goal.get("pal_goal_start_size") == len(pal) >= 1
-          and goal.get("pal_goal_set_at") is not None and goal.get("pal_goal_deadline") == "2027-06-30", show(goal))
-    for col, value in (("pal_goal_start_size", 99), ("pal_goal_set_at", "2000-01-01T00:00:00Z")):
-        status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {col: value})
-        check(f"{col} non modifiable par le client", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
-    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"pal_goal_deadline": None},
+    pal = rows(f"/rest/v1/user_books?user_id=eq.{A['id']}&status=eq.to_read&select=id", A["token"])
+    status, res = call("POST", "/rest/v1/pal_goals", A["token"], {"target": 0, "deadline": "2027-06-30"},
                        {"Prefer": "return=representation"})
+    goal = res[0] if status == 201 and res else {}
+    print(f"objectif de A (PAL de {len(pal)}) :", show(goal))
+    check("objectif PAL créé : user_id = auth.uid(), start_size = taille de la PAL, set_at posé, échéance gardée",
+          goal.get("user_id") == A["id"] and goal.get("target") == 0 and goal.get("start_size") == len(pal) >= 1
+          and goal.get("set_at") is not None and goal.get("deadline") == "2027-06-30", f"HTTP {status} {show(res)}")
+    for col, value in (("start_size", 99), ("set_at", "2000-01-01T00:00:00Z")):
+        status, res = call("PATCH", goal_path, A["token"], {col: value})
+        check(f"{col} non modifiable par le client", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
+    status, res = call("PATCH", goal_path, A["token"], {"deadline": None}, {"Prefer": "return=representation"})
     check("changer l'échéance seule ne touche ni start_size ni set_at",
-          status == 200 and res[0]["pal_goal_start_size"] == goal["pal_goal_start_size"]
-          and res[0]["pal_goal_set_at"] == goal["pal_goal_set_at"], show(res))
-    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"pal_goal_target": -1})
+          status == 200 and res[0]["deadline"] is None and res[0]["start_size"] == goal["start_size"]
+          and res[0]["set_at"] == goal["set_at"], show(res))
+    status, res = call("PATCH", goal_path, A["token"], {"target": 0}, {"Prefer": "return=representation"})
+    check("renvoyer la même cible ne relance pas l'objectif",
+          status == 200 and res[0]["start_size"] == goal["start_size"] and res[0]["set_at"] == goal["set_at"],
+          show(res))
+    status, res = call("PATCH", goal_path, A["token"], {"target": -1})
     check("objectif PAL négatif refusé", status == 400, f"HTTP {status}")
     call("DELETE", f"/rest/v1/user_books?user_id=eq.{A['id']}&book_id=eq.{test_id}", A["token"])
-    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"pal_goal_target": 1},
-                       {"Prefer": "return=representation"})
-    check("nouvelle cible : start_size recalculé sur la PAL du moment",
-          status == 200 and res[0]["pal_goal_start_size"] == len(pal) - 1
-          and parse_ts(res[0]["pal_goal_set_at"]) > parse_ts(goal["pal_goal_set_at"]), show(res))
-    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{B['id']}", A["token"], {"pal_goal_target": 3},
-                       {"Prefer": "return=representation"})
-    check("A ne peut pas fixer l'objectif de B", status == 200 and res == [], show(res))
-    status, res = call("PATCH", f"/rest/v1/profiles?id=eq.{A['id']}", A["token"], {"pal_goal_target": None},
-                       {"Prefer": "return=representation"})
-    check("objectif retiré : start_size et set_at remis à null",
-          status == 200 and res[0]["pal_goal_start_size"] is None and res[0]["pal_goal_set_at"] is None, show(res))
+    time.sleep(1.1)
+    status, res = call("PATCH", goal_path, A["token"], {"target": 1}, {"Prefer": "return=representation"})
+    retargeted = res[0] if status == 200 and res else {}
+    check("nouvelle cible : start_size recalculé sur la PAL du moment, set_at avancé",
+          retargeted.get("start_size") == len(pal) - 1
+          and parse_ts(retargeted["set_at"]) > parse_ts(goal["set_at"]), show(res))
+    status, res = call("POST", "/rest/v1/pal_goals", A["token"],
+                       {"user_id": A["id"], "target": 2, "deadline": "2027-12-31"},
+                       {"Prefer": "resolution=merge-duplicates,return=representation"})
+    check("upsert sur user_id (ce que fait l'app) : cible et échéance mises à jour",
+          status in (200, 201) and res and res[0]["target"] == 2 and res[0]["deadline"] == "2027-12-31"
+          and res[0]["start_size"] == len(pal) - 1 and parse_ts(res[0]["set_at"]) > parse_ts(retargeted["set_at"]),
+          f"HTTP {status} {show(res)[:200]}")
+    status, res = call("POST", "/rest/v1/pal_goals", A["token"], {"user_id": A["id"], "target": 1, "start_size": 99})
+    check("start_size refusé à l'insertion", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
 
+    # Privé : ici A est public, B privé, et A suit B (accepté). B n'a pas encore
+    # d'objectif : un refus ne peut venir que de la RLS (pas d'un conflit de clé).
+    status, res = call("POST", "/rest/v1/pal_goals", A["token"], {"user_id": B["id"], "target": 9})
+    check("A ne peut pas créer d'objectif pour B", status == 403, f"HTTP {status} {show(res)[:120]}")
+    status, res = call("PATCH", goal_path, A["token"], {"user_id": B["id"]}, {"Prefer": "return=representation"})
+    check("A ne peut pas donner son objectif à B (changer user_id)", status == 403, f"HTTP {status} {show(res)[:120]}")
+    status, res = call("POST", "/rest/v1/pal_goals", B["token"], {"target": 3}, {"Prefer": "return=representation"})
+    check("B fixe son objectif", status == 201 and res[0]["user_id"] == B["id"], f"HTTP {status} {show(res)[:120]}")
+    b_goal = f"/rest/v1/pal_goals?user_id=eq.{B['id']}&select=*"
+    check("A ne voit pas l'objectif de B (B privé, A le suit avec un follow accepté)", rows(b_goal, A["token"]) == [])
+    check("B ne voit pas l'objectif de A (A public)", rows(goal_path + "&select=*", B["token"]) == [])
+    call("PATCH", f"/rest/v1/profiles?id=eq.{B['id']}", B["token"], {"is_private": False})
+    try:
+        check("A ne voit toujours pas l'objectif de B (B public et suivi)", rows(b_goal, A["token"]) == [])
+    finally:
+        call("PATCH", f"/rest/v1/profiles?id=eq.{B['id']}", B["token"], {"is_private": True})
+    status, res = call("GET", "/rest/v1/pal_goals?select=user_id")
+    check("pal_goals refusée sans session", status in (401, 403) or res == [], f"HTTP {status} {show(res)[:120]}")
+    status, res = call("PATCH", f"/rest/v1/pal_goals?user_id=eq.{B['id']}", A["token"], {"target": 9},
+                       {"Prefer": "return=representation"})
+    check("A ne peut pas modifier l'objectif de B", status == 200 and res == [], show(res))
+    status, res = call("DELETE", f"/rest/v1/pal_goals?user_id=eq.{B['id']}", A["token"],
+                       headers={"Prefer": "return=representation"})
+    check("A ne peut pas supprimer l'objectif de B", status == 200 and res == [] and rows(b_goal, B["token"]),
+          show(res))
+    status, res = call("DELETE", goal_path, A["token"], headers={"Prefer": "return=representation"})
+    check("objectif retiré : la ligne est supprimée", status == 200 and len(res) == 1
+          and rows(goal_path + "&select=*", A["token"]) == [], show(res))
+    status, res = call("GET", f"/rest/v1/profiles?id=eq.{A['id']}&select=*", B["token"])
+    check("profiles ne porte plus aucune colonne d'objectif",
+          status == 200 and res and not any(k.startswith("pal_goal") for k in res[0]), show(res))
 
 try:
     section_unshelf_rest()
@@ -679,17 +719,20 @@ def section_unshelf_sql():
       select r.role,
              has_table_privilege(r.role, 'public.user_book_events', 'insert,update,delete,truncate') as write,
              has_table_privilege(r.role, 'public.user_book_events', 'select') as read,
-             has_column_privilege(r.role, 'public.profiles', 'pal_goal_start_size', 'insert,update') as start_size,
-             has_column_privilege(r.role, 'public.profiles', 'pal_goal_set_at', 'insert,update') as set_at,
-             has_column_privilege(r.role, 'public.profiles', 'pal_goal_target', 'update') as target
+             has_column_privilege(r.role, 'public.pal_goals', 'start_size', 'insert,update') as start_size,
+             has_column_privilege(r.role, 'public.pal_goals', 'set_at', 'insert,update') as set_at,
+             has_column_privilege(r.role, 'public.pal_goals', 'target', 'insert')
+               and has_column_privilege(r.role, 'public.pal_goals', 'target', 'update') as target,
+             has_table_privilege(r.role, 'public.pal_goals', 'select')
+               and has_table_privilege(r.role, 'public.pal_goals', 'delete') as goal_read_delete
         from unnest(array['anon', 'authenticated']) as r(role)""")
     print("droits Unshelf:", show(rights))
     by_role = {r.pop("role"): r for r in rights}
     check("user_book_events : aucune écriture pour anon ni authenticated, lecture pour authenticated seul ; "
-          "pal_goal_start_size et pal_goal_set_at non modifiables, pal_goal_target modifiable",
+          "pal_goals : aucun droit pour anon ; start_size et set_at non modifiables, target modifiable",
           not any(by_role["anon"].values())
           and by_role["authenticated"] == {"write": False, "read": True, "start_size": False, "set_at": False,
-                                           "target": True}, show(by_role))
+                                           "target": True, "goal_read_delete": True}, show(by_role))
 
     # Reprise de l'existant : chaque ligne, reprise ou créée depuis, a un
     # événement d'origine ∅→statut daté de son created_at (la migration l'a posé
