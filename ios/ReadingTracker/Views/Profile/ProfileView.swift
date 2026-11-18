@@ -103,7 +103,7 @@ struct ProfileView: View {
   }
 
   private var earnedDates: [Badge: Date] {
-    game.earned.mapValues { $0.earnedDate ?? .now }
+    UserBadge.dates(Array(game.earned.values))
   }
 
   private func badgeSheet(_ badge: Badge) -> some View {
@@ -122,7 +122,7 @@ struct ProfileView: View {
       Toggle(isOn: gameBinding) {
         Label("Jeu", systemImage: "gamecontroller")
       }
-      .disabled(auth.profile?.gamificationStartedAt == nil)
+      .disabled(auth.profile?.gamificationStartDate == nil)
     } footer: {
       Text(
         auth.profile?.gamificationEnabled == false

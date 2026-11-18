@@ -21,21 +21,47 @@ final class GameService {
 
   private var pendingBadges: [Badge] = []
   private var picksOwner: UUID?
+  /// Compte dont les badges sont chargés : une réponse arrivée après une déconnexion est ignorée.
+  private var badgesOwner: UUID?
   /// Badges en cours d'insertion, pour ne pas les envoyer deux fois.
   private var inserting: Set<Badge> = []
+  private var lastCelebration: Date = .distantPast
+  /// Dernier état calculé et ce qui l'a produit : les vues le lisent à chaque rendu, l'historique peut être long.
+  @ObservationIgnored private var cachedState: (key: Int, state: GameState)?
+
+  /// Un badge obtenu il y a plus longtemps que cela est enregistré sans carte (par exemple en réactivant le jeu).
+  private static let celebrationWindow: TimeInterval = 24 * 3600
 
   // MARK: État du jeu
 
-  /// État du jeu du compte, ou `nil` quand le jeu est masqué (réglage « Jeu » désactivé, ou profil sans
-  /// début de décompte, c'est-à-dire un backend qui ne connaît pas encore la gamification).
-  func state(profile: Profile?, events: [UserBookEvent], library: [UserBook], goal: PALGoal?, now: Date = .now) -> GameState? {
-    guard let profile, profile.gamificationEnabled, let startedAt = profile.gamificationStartDate else { return nil }
-    return GameEngine.compute(events: events, library: library, goal: goal, startedAt: startedAt, picks: picks, now: now)
+  /// Le jeu est affiché : réglage « Jeu » activé, et début du décompte connu (sinon le backend ne connaît pas
+  /// encore la gamification).
+  static func isEnabled(_ profile: Profile?) -> Bool {
+    guard let profile else { return false }
+    return profile.gamificationEnabled && profile.gamificationStartDate != nil
   }
 
-  /// État du jeu à partir des services de l'app.
+  /// État du jeu du compte, ou `nil` quand le jeu est masqué. Recalculé seulement quand l'historique, la
+  /// bibliothèque, l'objectif, le profil, les suggestions de la pioche ou l'heure changent.
   func state(auth: AuthService, library: LibraryService, pal: PALService) -> GameState? {
-    state(profile: auth.profile, events: pal.events, library: library.items, goal: pal.goal)
+    guard Self.isEnabled(auth.profile), let startedAt = auth.profile?.gamificationStartDate else { return nil }
+    let now = Date.now
+    var hasher = Hasher()
+    hasher.combine(startedAt)
+    hasher.combine(pal.events)
+    hasher.combine(library.items.map { [$0.id.hashValue, $0.status.hashValue, $0.book?.pageCount ?? -1] })
+    hasher.combine(pal.goal?.target)
+    hasher.combine(pal.goal?.startSize)
+    hasher.combine(picks.map { [$0.userBookId.hashValue, $0.suggestedAt.hashValue] })
+    // Le mois en cours et la fin de l'installation dépendent de l'heure : une précision à la minute suffit.
+    hasher.combine(Int(now.timeIntervalSince1970 / 60))
+    let key = hasher.finalize()
+    if let cachedState, cachedState.key == key { return cachedState.state }
+    let state = GameEngine.compute(
+      events: pal.events, library: library.items, goal: pal.goal, startedAt: startedAt, picks: picks, now: now
+    )
+    cachedState = (key, state)
+    return state
   }
 
   /// Calcule le jeu et enregistre les badges nouvellement obtenus (après un changement de statut, au lancement).
@@ -45,15 +71,25 @@ final class GameService {
     await award(state, userId: userId, library: library.items)
   }
 
-  static func isEnabled(_ profile: Profile?) -> Bool {
-    guard let profile else { return false }
-    return profile.gamificationEnabled && profile.gamificationStartDate != nil
+  /// Après un changement de statut (la bibliothèque a déjà changé) : célébrer un livre fini ou libéré et
+  /// l'objectif atteint, puis attribuer les badges que ce changement fait obtenir. Rien si le jeu est masqué.
+  func statusDidChange(from: ReadingStatus?, to: ReadingStatus?, auth: AuthService, library: LibraryService, pal: PALService) {
+    guard Self.isEnabled(auth.profile) else { return }
+    var celebrates = to == .read || to == .released
+    if let goal = pal.goal {
+      let size = library.toReadCount
+      let before = size + (from == .toRead ? 1 : 0) - (to == .toRead ? 1 : 0)
+      if !goal.isReached(currentSize: before), goal.isReached(currentSize: size) { celebrates = true }
+    }
+    if celebrates { celebrate() }
+    Task { await evaluate(auth: auth, library: library, pal: pal) }
   }
 
   // MARK: Badges
 
   func loadBadges(userId: UUID) async {
     loadPicks(userId: userId)
+    badgesOwner = userId
     if AppConfig.isDemo {
       if !hasLoadedBadges { earned = Self.byBadge(DemoData.earnedBadges) }
       hasLoadedBadges = true
@@ -65,6 +101,7 @@ final class GameService {
         .eq("user_id", value: userId)
         .execute()
         .value
+      guard badgesOwner == userId else { return }
       earned = Self.byBadge(rows)
       hasLoadedBadges = true
     } catch {
@@ -84,17 +121,18 @@ final class GameService {
   }
 
   /// Enregistre les badges que l'état du jeu attribue et qui ne le sont pas encore (`on conflict do nothing`),
-  /// et les célèbre si `celebrate`. Le livre déclencheur n'est envoyé que s'il est encore dans la bibliothèque
-  /// (sinon la clé étrangère refuserait la ligne).
-  func award(_ state: GameState, userId: UUID, library: [UserBook], celebrate: Bool = true) async {
-    guard hasLoadedBadges else { return }
+  /// datés de l'événement qui les a fait obtenir, et célèbre ceux des dernières 24 h. Le livre déclencheur
+  /// n'est envoyé que s'il est encore dans la bibliothèque (sinon la clé étrangère refuserait la ligne).
+  func award(_ state: GameState, userId: UUID, library: [UserBook]) async {
+    guard hasLoadedBadges, badgesOwner == userId else { return }
     let rowIds = Set(library.map(\.id))
     let new = state.awards.filter { earned[$0.badge] == nil && !inserting.contains($0.badge) }
     guard !new.isEmpty else { return }
 
+    let formatter = ISO8601DateFormatter()
     let rows = new.map { award in
       UserBadgeInsert(
-        userId: userId, badgeId: award.badge.rawValue,
+        userId: userId, badgeId: award.badge.rawValue, earnedAt: formatter.string(from: award.earnedAt),
         userBookId: award.userBookId.flatMap { rowIds.contains($0) ? $0 : nil }
       )
     }
@@ -112,12 +150,14 @@ final class GameService {
       }
     }
 
-    let now = ISO8601DateFormatter().string(from: .now)
+    // Déconnecté pendant l'envoi : ces badges ne concernent plus la session affichée.
+    guard badgesOwner == userId else { return }
     for row in rows {
       guard let badge = Badge(rawValue: row.badgeId) else { continue }
-      earned[badge] = UserBadge(userId: userId, badgeId: row.badgeId, earnedAt: now, userBookId: row.userBookId)
+      earned[badge] = UserBadge(userId: userId, badgeId: row.badgeId, earnedAt: row.earnedAt, userBookId: row.userBookId)
     }
-    if celebrate { enqueue(new.map(\.badge)) }
+    let recent = Date.now.addingTimeInterval(-Self.celebrationWindow)
+    enqueue(new.filter { $0.earnedAt >= recent }.map(\.badge))
   }
 
   private static func byBadge(_ rows: [UserBadge]) -> [Badge: UserBadge] {
@@ -130,12 +170,15 @@ final class GameService {
 
   // MARK: Célébrations
 
-  /// Confettis légers et retour haptique.
+  /// Confettis légers et retour haptique, une fois pour plusieurs raisons simultanées (livre fini et badge).
   func celebrate() {
+    guard Date.now.timeIntervalSince(lastCelebration) > 1.5 else { return }
+    lastCelebration = .now
     confettiBursts += 1
   }
 
   private func enqueue(_ badges: [Badge]) {
+    guard !badges.isEmpty else { return }
     pendingBadges.append(contentsOf: badges.filter { $0 != celebratedBadge && !pendingBadges.contains($0) })
     if celebratedBadge == nil { showNextBadge() }
   }
@@ -189,6 +232,8 @@ final class GameService {
   }
 
   func reset() {
+    badgesOwner = nil
+    cachedState = nil
     earned = [:]
     hasLoadedBadges = false
     celebratedBadge = nil

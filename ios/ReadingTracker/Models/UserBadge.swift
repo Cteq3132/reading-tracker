@@ -21,17 +21,29 @@ struct UserBadge: Codable, Hashable, Sendable {
   var badge: Badge? { Badge(rawValue: badgeId) }
 
   var earnedDate: Date? { PostgresDate.parse(earnedAt) }
+
+  /// Date d'obtention de chaque badge connu de l'app.
+  static func dates(_ rows: [UserBadge]) -> [Badge: Date] {
+    var result: [Badge: Date] = [:]
+    for row in rows {
+      if let badge = row.badge { result[badge] = row.earnedDate ?? .now }
+    }
+    return result
+  }
 }
 
-/// Insertion d'un badge obtenu (`on conflict do nothing`) : `earned_at` prend la valeur par défaut du serveur.
+/// Insertion d'un badge obtenu (`on conflict do nothing`), daté de l'événement qui l'a fait obtenir.
 struct UserBadgeInsert: Encodable, Sendable {
   var userId: UUID
   var badgeId: String
+  /// `timestamptz` ISO 8601.
+  var earnedAt: String
   var userBookId: UUID?
 
   enum CodingKeys: String, CodingKey {
     case userId = "user_id"
     case badgeId = "badge_id"
+    case earnedAt = "earned_at"
     case userBookId = "user_book_id"
   }
 
@@ -39,6 +51,7 @@ struct UserBadgeInsert: Encodable, Sendable {
     var c = encoder.container(keyedBy: CodingKeys.self)
     try c.encode(userId, forKey: .userId)
     try c.encode(badgeId, forKey: .badgeId)
+    try c.encode(earnedAt, forKey: .earnedAt)
     try c.encode(userBookId, forKey: .userBookId)
   }
 }
