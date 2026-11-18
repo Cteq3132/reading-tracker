@@ -44,8 +44,7 @@ final class GameService {
   /// l'objectif, le profil, les suggestions de la pioche ou l'heure changent.
   func state(auth: AuthService, library: LibraryService, pal: PALService) -> GameState? {
     guard Self.isEnabled(auth.profile) else { return nil }
-    let startedAt = auth.profile?.gamificationStartDate
-    guard startedAt != nil else { return GameState() }
+    guard let startedAt = auth.profile?.gamificationStartDate else { return GameState() }
     let now = Date.now
     var hasher = Hasher()
     hasher.combine(startedAt)

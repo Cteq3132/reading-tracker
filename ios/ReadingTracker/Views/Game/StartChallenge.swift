@@ -30,14 +30,14 @@ struct StartChallengeButton: View {
   @Environment(AuthService.self) private var auth
   @Environment(LibraryService.self) private var library
 
-  @State private var confirms = false
+  @State private var confirmStart = false
   @State private var isStarting = false
   @State private var errorMessage: String?
 
   var body: some View {
     button
       .disabled(isStarting || auth.profile == nil)
-      .confirmationDialog("Démarrer le défi ?", isPresented: $confirms, titleVisibility: .visible) {
+      .confirmationDialog("Démarrer le défi ?", isPresented: $confirmStart, titleVisibility: .visible) {
         Button(ChallengeText.title) {
           Task { await start() }
         }
@@ -52,14 +52,14 @@ struct StartChallengeButton: View {
   private var button: some View {
     switch style {
     case .card:
-      Button { confirms = true } label: {
+      Button { confirmStart = true } label: {
         Label(ChallengeText.title, systemImage: "flag.checkered")
           .font(.subheadline.weight(.semibold))
           .frame(maxWidth: .infinity)
       }
       .buttonStyle(.glass)
     case .row:
-      Button(ChallengeText.title, systemImage: "flag.checkered") { confirms = true }
+      Button(ChallengeText.title, systemImage: "flag.checkered") { confirmStart = true }
     }
   }
 
