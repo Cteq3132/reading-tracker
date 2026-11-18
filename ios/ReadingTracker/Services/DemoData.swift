@@ -2,10 +2,15 @@ import Foundation
 
 /// Données d'exemple du mode démo (`-demo`, Debug uniquement) : permettent de vérifier le rendu sans backend.
 enum DemoData {
+  /// Mon profil. Le jeu a commencé il y a quatre mois (installation terminée) ; `-demo-game off` le masque.
   static let me = Profile(
     id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
-    username: "louis", displayName: "Louis"
+    username: "louis", displayName: "Louis",
+    gamificationEnabled: AppConfig.demoGame != "off", gamificationStartedAt: iso(gameStart)
   )
+
+  /// Début du décompte du jeu : le 1er du mois situé quatre mois avant le mois en cours.
+  static var gameStart: Date { monthDay(1, monthsAgo: 4) }
 
   static func day(_ daysAgo: Int) -> String {
     PostgresDate.day(from: Calendar.current.date(byAdding: .day, value: -daysAgo, to: .now) ?? .now)
@@ -187,11 +192,12 @@ enum DemoData {
     item("Yoga", .wishlist, since: ago(months: 2), hoursAgo: 170),
     item("La Vie devant soi", .wishlist, since: ago(months: 7), hoursAgo: 180),
     // Lus, abandonné, libérés.
-    item("L'Étranger", .read, since: ago(days: 45), startedAt: day(60), finishedAt: day(45), rating: 5,
+    item("L'Étranger", .read, since: lastMonth(4), startedAt: PostgresDate.day(from: monthDay(10, monthsAgo: 2)),
+         finishedAt: PostgresDate.day(from: lastMonth(4)), rating: 5,
          review: "Une écriture sèche et lumineuse. À relire.", isFavorite: true, hoursAgo: 200),
     item("Le Petit Prince", .read, since: thisMonth(14), finishedAt: PostgresDate.day(from: thisMonth(14)), rating: 4,
          hoursAgo: 30),
-    item("Madame Bovary", .abandoned, since: ago(months: 4), currentPage: 140, hoursAgo: 400),
+    item("Madame Bovary", .abandoned, since: monthDay(5, monthsAgo: 3), currentPage: 140, hoursAgo: 400),
     item("Da Vinci Code", .released, since: thisMonth(5), hoursAgo: 20),
     item("L'Alchimiste", .released, since: thisMonth(12), hoursAgo: 10),
   ]
@@ -211,26 +217,105 @@ enum DemoData {
     )
   }
 
-  /// Mon historique sur deux mois. Ce mois-ci : 2 entrées, 5 sorties (dont une suppression),
-  /// et deux changements hors PAL qui ne comptent pas : « +2 · −5 · −3 ».
+  /// Mon historique complet. Les entrées anciennes donnent l'ancienneté des livres dans la PAL ; le jeu
+  /// compte à partir de `gameStart` (installation de 14 jours) :
+  /// - il y a 4 mois : 4 sorties, dont Madame Bovary, plus vieux livre de la PAL (5 ans) → au vert ;
+  /// - il y a 3 mois : 1 sortie, 1 entrée → pas au vert (avec `-demo-tokens overdrawn`, 4 entrées de plus) ;
+  /// - il y a 2 mois : 3 sorties, 1 entrée ; le mois dernier : 2 sorties, 1 entrée → au vert ;
+  /// - ce mois-ci : 2 entrées, 5 sorties (dont une suppression), et deux changements hors PAL : « +2 · −5 · −3 ».
+  /// Soit 15 sorties et 5 entrées payantes : 2 jetons ½, et une série de 3 mois au vert.
   static var events: [UserBookEvent] {
-    [
-      event(1, libraryItem("Les Choses"), nil, .toRead, lastMonth(13)),
-      event(2, libraryItem("Dune"), .toRead, .reading, lastMonth(20)),
-      event(3, libraryItem("L'Écume des jours"), nil, .toRead, thisMonth(3)),
-      event(4, libraryItem("Da Vinci Code"), .toRead, .released, thisMonth(5)),
-      event(5, nil, .toRead, nil, thisMonth(6)),
-      event(6, libraryItem("La Peste"), .toRead, .reading, thisMonth(8)),
-      event(7, libraryItem("Germinal"), .wishlist, .toRead, thisMonth(9)),
-      event(8, libraryItem("Veiller sur elle"), nil, .wishlist, thisMonth(11)),
-      event(9, libraryItem("L'Alchimiste"), .toRead, .released, thisMonth(12)),
-      event(10, libraryItem("Le Petit Prince"), .reading, .read, thisMonth(14)),
-      event(11, libraryItem("Le Mage du Kremlin"), .toRead, .reading, thisMonth(15)),
+    var id: Int64 = 0
+    func e(_ title: String?, _ from: ReadingStatus?, _ to: ReadingStatus?, _ at: Date) -> UserBookEvent {
+      id += 1
+      return event(id, title.map(libraryItem), from, to, at)
+    }
+    var history = [
+      // Entrées dans la PAL avant le début du jeu.
+      e("Madame Bovary", nil, .toRead, ago(years: 5)),
+      e("Le Rouge et le Noir", nil, .toRead, ago(years: 4)),
+      e("Les Misérables", nil, .toRead, ago(years: 3)),
+      e("Belle du Seigneur", nil, .toRead, ago(months: 5, years: 2)),
+      e("1984", nil, .toRead, ago(years: 2)),
+      e("L'Homme révolté", nil, .toRead, ago(months: 14)),
+      e("Dune", nil, .toRead, ago(years: 1)),
+      e("Da Vinci Code", nil, .toRead, ago(months: 11)),
+      e("La Peste", nil, .toRead, ago(months: 10)),
+      e("Le Mage du Kremlin", nil, .toRead, ago(months: 9)),
+      e("Sapiens", nil, .toRead, ago(months: 8)),
+      e("L'Alchimiste", nil, .toRead, ago(months: 7)),
+      e("La Horde du Contrevent", nil, .toRead, ago(months: 6)),
+      e("Germinal", nil, .wishlist, ago(months: 5)),
+      // Il y a 4 mois.
+      e("Madame Bovary", .toRead, .reading, monthDay(18, monthsAgo: 4)),
+      e(nil, .toRead, .released, monthDay(20, monthsAgo: 4)),
+      e(nil, .toRead, .released, monthDay(22, monthsAgo: 4)),
+      e(nil, .toRead, .read, monthDay(25, monthsAgo: 4)),
+      // Il y a 3 mois.
+      e("Madame Bovary", .reading, .abandoned, monthDay(5, monthsAgo: 3)),
+      e(nil, .toRead, .reading, monthDay(10, monthsAgo: 3)),
+      e("Bel-Ami", nil, .toRead, ago(months: 3)),
+      // Il y a 2 mois.
+      e("L'Étranger", nil, .toRead, monthDay(2, monthsAgo: 2)),
+      e("L'Étranger", .toRead, .reading, monthDay(10, monthsAgo: 2)),
+      e(nil, .toRead, .released, monthDay(14, monthsAgo: 2)),
+      e(nil, .toRead, .released, monthDay(25, monthsAgo: 2)),
+      // Le mois dernier.
+      e("L'Étranger", .reading, .read, lastMonth(4)),
+      e("Les Choses", nil, .toRead, lastMonth(13)),
+      e("Dune", .toRead, .reading, lastMonth(20)),
+      e(nil, .toRead, .released, lastMonth(25)),
+      // Ce mois-ci.
+      e("L'Écume des jours", nil, .toRead, thisMonth(3)),
+      e("Da Vinci Code", .toRead, .released, thisMonth(5)),
+      e(nil, .toRead, nil, thisMonth(6)),
+      e("La Peste", .toRead, .reading, thisMonth(8)),
+      e("Germinal", .wishlist, .toRead, thisMonth(9)),
+      e("Veiller sur elle", nil, .wishlist, thisMonth(11)),
+      e("L'Alchimiste", .toRead, .released, thisMonth(12)),
+      e("Le Petit Prince", .reading, .read, thisMonth(14)),
+      e("Le Mage du Kremlin", .toRead, .reading, thisMonth(15)),
+    ]
+    if AppConfig.demoTokens == "overdrawn" {
+      history += (20...23).map { day in e(nil, nil, .toRead, monthDay(day, monthsAgo: 3)) }
+    }
+    return history
+  }
+
+  // MARK: Jeu
+
+  /// Badges déjà enregistrés : ceux que l'historique de la démo fait obtenir. Restent à obtenir : Grand
+  /// ménage, Pavé, Moitié moins, Objectif atteint et Coup de dé (que « Piocher dans ma PAL » fait gagner).
+  static var earnedBadges: [UserBadge] {
+    let bovary = libraryItem("Madame Bovary").id
+    func badge(_ badge: Badge, _ at: Date, _ book: UUID? = nil) -> UserBadge {
+      UserBadge(userId: me.id, badgeId: badge.rawValue, earnedAt: iso(at), userBookId: book)
+    }
+    return [
+      badge(.firstExit, monthDay(18, monthsAgo: 4), bovary),
+      badge(.bottomOfPile, monthDay(18, monthsAgo: 4), bovary),
+      badge(.archaeologist, monthDay(18, monthsAgo: 4), bovary),
+      badge(.greenMonth, monthDay(18, monthsAgo: 4)),
+      badge(.tenOut, lastMonth(25)),
+      badge(.greenStreak3, thisMonth(6)),
+    ]
+  }
+
+  /// Badges des amis. Tom a masqué le jeu : son profil n'en montre aucun.
+  static var friendBadges: [UUID: [UserBadge]] {
+    func badges(_ user: Profile, _ list: [(Badge, Int)]) -> [UserBadge] {
+      list.map { badge, daysAgo in
+        UserBadge(userId: user.id, badgeId: badge.rawValue, earnedAt: iso(ago(days: daysAgo)))
+      }
+    }
+    return [
+      lea.id: badges(lea, [(.firstExit, 120), (.greenMonth, 95), (.tenOut, 40), (.bigCleanup, 12), (.brick, 3)]),
+      nina.id: badges(nina, [(.firstExit, 30), (.pickAccepted, 9)]),
     ]
   }
 
   static let lea = Profile(username: "lea_lit", displayName: "Léa Martin")
-  static let tom = Profile(username: "tom", displayName: "Tom Durand")
+  static let tom = Profile(username: "tom", displayName: "Tom Durand", gamificationEnabled: false)
   static let nina = Profile(username: "nina_b", displayName: "Nina B.")
   static let camille = Profile(username: "camille_r", displayName: "Camille Roux", isPrivate: true)
   static let hugo = Profile(username: "hugo_lecteur", displayName: "Hugo", isPrivate: true)

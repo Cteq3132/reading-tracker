@@ -3,7 +3,9 @@ import SwiftUI
 /// « Piocher dans ma PAL » : propose un livre de la PAL (au hasard, le plus ancien ou le plus court),
 /// à commencer tout de suite ou à remplacer par un autre.
 struct DrawSheet: View {
+  @Environment(AuthService.self) private var auth
   @Environment(LibraryService.self) private var library
+  @Environment(GameService.self) private var game
   @Environment(\.dismiss) private var dismiss
 
   @State private var mode: PALDrawMode = .random
@@ -60,6 +62,10 @@ struct DrawSheet: View {
       .onAppear { if order.isEmpty { reorder() } }
       .onChange(of: mode) { withAnimation(.snappy) { reorder() } }
       .sensoryFeedback(.selection, trigger: current?.id)
+      // Chaque livre proposé est mémorisé localement : le commencer sous 7 jours vaut le badge « Coup de dé ».
+      .onChange(of: current?.id, initial: true) { _, id in
+        if let id, let userId = auth.userId { game.recordPick(userBookId: id, userId: userId) }
+      }
       .errorAlert($errorMessage)
     }
   }

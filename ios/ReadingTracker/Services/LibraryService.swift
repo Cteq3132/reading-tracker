@@ -159,8 +159,9 @@ final class LibraryService {
     if !AppConfig.isDemo {
       try await supabase.from("user_books").delete().eq("id", value: id).execute()
     }
-    if let removed = item(id: id) { onStatusChange?(removed, removed.status, nil) }
+    let removed = item(id: id)
     items.removeAll { $0.id == id }
+    if let removed { onStatusChange?(removed, removed.status, nil) }
   }
 
   func reset() {

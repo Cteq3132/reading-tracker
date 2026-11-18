@@ -1,10 +1,12 @@
 import SwiftUI
 
-/// Carte en tête de l'Accueil : taille de la PAL, bilan du mois, objectif et pioche.
+/// Carte en tête de l'Accueil : taille de la PAL, bilan du mois, jeu (jetons et série), objectif et pioche.
 struct PALCard: View {
   let size: Int
   let balance: PALBalance
   let goal: PALGoal?
+  /// État du jeu ; `nil` quand le jeu est masqué.
+  var game: GameState? = nil
   let onDraw: () -> Void
   let onSetGoal: () -> Void
   let onAdd: () -> Void
@@ -27,9 +29,15 @@ struct PALCard: View {
   private var filled: some View {
     VStack(alignment: .leading, spacing: 18) {
       VStack(alignment: .leading, spacing: 4) {
-        Label("Ma PAL", systemImage: "books.vertical")
-          .font(.subheadline.weight(.semibold))
-          .foregroundStyle(.secondary)
+        HStack(alignment: .firstTextBaseline) {
+          Label("Ma PAL", systemImage: "books.vertical")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
+          Spacer(minLength: 8)
+          if let game, game.streak > 0 {
+            StreakLabel(streak: game.streak)
+          }
+        }
         HStack(alignment: .firstTextBaseline, spacing: 8) {
           Text("\(size)")
             .font(.system(size: 52, weight: .bold, design: .rounded))
@@ -42,6 +50,10 @@ struct PALCard: View {
         balanceLine
       }
       .accessibilityElement(children: .combine)
+
+      if let game {
+        TokenLine(state: game)
+      }
 
       if let goal {
         PALGoalProgress(
@@ -106,6 +118,9 @@ struct PALCard: View {
         .foregroundStyle(.secondary)
         .multilineTextAlignment(.center)
       }
+      if let game {
+        TokenLine(state: game)
+      }
       Button("Ajouter un livre", action: onAdd)
         .buttonStyle(.glassProminent)
     }
@@ -157,5 +172,95 @@ enum PALGoalText {
     let left = goal.remaining(currentSize: currentSize)
     if left == 0 { return "Objectif atteint, bravo !" }
     return "Encore \(left) livre\(left > 1 ? "s" : "") à sortir de ta PAL"
+  }
+}
+
+/// Série de mois au vert, discrète, en haut à droite de la carte PAL : « 🔥 3 mois au vert ».
+struct StreakLabel: View {
+  let streak: Int
+
+  var body: some View {
+    Text("🔥 \(streak) mois au vert")
+      .font(.subheadline.weight(.semibold))
+      .foregroundStyle(.secondary)
+      .monospacedDigit()
+      .lineLimit(1)
+      .accessibilityLabel("Série : \(streak) mois au vert")
+  }
+}
+
+/// Solde de jetons d'achat de la carte PAL. Toucher la ligne explique les règles.
+private struct TokenLine: View {
+  let state: GameState
+  @State private var showsRules = false
+
+  var body: some View {
+    Button { showsRules = true } label: {
+      HStack(spacing: 10) {
+        Image(systemName: state.tokens.isOverdrawn ? "creditcard" : "bag.fill")
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(state.tokens.isOverdrawn ? AnyShapeStyle(.orange) : AnyShapeStyle(.tint))
+          .frame(width: 22)
+        VStack(alignment: .leading, spacing: 1) {
+          Text(state.tokens.label)
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(.primary)
+            .multilineTextAlignment(.leading)
+          if state.isInstalling(at: .now) {
+            Text("Ajouts gratuits jusqu'au \(installationEnd)")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+        }
+        Spacer(minLength: 4)
+        Image(systemName: "info.circle")
+          .font(.footnote)
+          .foregroundStyle(.tertiary)
+      }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 10)
+      .background(Color(.tertiarySystemFill), in: .rect(cornerRadius: 14))
+      .contentShape(.rect)
+    }
+    .buttonStyle(.plain)
+    .accessibilityHint("Explique les jetons")
+    .popover(isPresented: $showsRules) {
+      TokenRules(installationEnd: state.isInstalling(at: .now) ? installationEnd : nil)
+        .presentationCompactAdaptation(.popover)
+    }
+  }
+
+  private var installationEnd: String {
+    state.installationEndsAt.formatted(.dateTime.day().month(.wide).locale(Locale(identifier: "fr_FR")))
+  }
+}
+
+/// Règles des jetons, en quelques lignes.
+private struct TokenRules: View {
+  let installationEnd: String?
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Text("Jetons d'achat")
+        .font(.headline)
+      rule("arrow.down.right", "Chaque livre qui sort de ta PAL rapporte ½ jeton.")
+      rule("arrow.up.right", "Chaque livre qui y entre en coûte 1.")
+      if let installationEnd {
+        rule("gift", "Jusqu'au \(installationEnd), tes ajouts sont gratuits : saisis ta PAL tranquillement.")
+      }
+      rule("hand.thumbsup", "À découvert, rien n'est bloqué : c'est juste un rappel.")
+    }
+    .padding(18)
+    .frame(width: 300, alignment: .leading)
+  }
+
+  private func rule(_ symbol: String, _ text: String) -> some View {
+    Label {
+      Text(text).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+    } icon: {
+      Image(systemName: symbol)
+        .foregroundStyle(.tint)
+        .frame(width: 24)
+    }
   }
 }

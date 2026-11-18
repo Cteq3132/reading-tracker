@@ -8,6 +8,7 @@ struct HomeView: View {
   @Environment(LibraryService.self) private var library
   @Environment(SocialService.self) private var social
   @Environment(PALService.self) private var pal
+  @Environment(GameService.self) private var game
 
   @State private var pageUpdate: UserBook?
   @State private var showsDraw = false
@@ -41,7 +42,7 @@ struct HomeView: View {
       }
       .refreshable {
         guard let userId = auth.userId else { return }
-        await MainTabView.refreshAll(userId: userId, library: library, social: social, pal: pal)
+        await MainTabView.refreshAll(userId: userId, auth: auth, library: library, social: social, pal: pal, game: game)
       }
       .sheet(item: $pageUpdate) { item in
         PageUpdateSheet(item: item)
@@ -87,6 +88,7 @@ struct HomeView: View {
         size: library.toReadCount,
         balance: pal.monthBalance(),
         goal: pal.goal,
+        game: game.state(auth: auth, library: library, pal: pal),
         onDraw: { showsDraw = true },
         onSetGoal: { showsGoal = true },
         onAdd: { selectedTab = .add }

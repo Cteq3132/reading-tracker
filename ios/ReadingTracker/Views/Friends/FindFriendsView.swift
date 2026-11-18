@@ -50,6 +50,9 @@ struct FindFriendsView: View {
       .textInputAutocapitalization(.never)
       .autocorrectionDisabled()
       .task(id: query) { await runSearch() }
+      .navigationDestination(for: Profile.self) { profile in
+        FriendProfileView(profile: profile)
+      }
       .toolbar {
         ToolbarItem(placement: .cancellationAction) {
           Button("Fermer", systemImage: "xmark") { dismiss() }
@@ -60,6 +63,16 @@ struct FindFriendsView: View {
   }
 
   private func row(_ profile: Profile) -> some View {
+    HStack(spacing: 12) {
+      NavigationLink(value: profile) {
+        identity(profile)
+      }
+      followButton(profile)
+    }
+    .padding(.vertical, 2)
+  }
+
+  private func identity(_ profile: Profile) -> some View {
     HStack(spacing: 12) {
       AvatarView(name: profile.name, url: profile.avatarUrl, size: 40)
       VStack(alignment: .leading, spacing: 1) {
@@ -78,9 +91,7 @@ struct FindFriendsView: View {
           .foregroundStyle(.secondary)
       }
       Spacer(minLength: 8)
-      followButton(profile)
     }
-    .padding(.vertical, 2)
   }
 
   @ViewBuilder

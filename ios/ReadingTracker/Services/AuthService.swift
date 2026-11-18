@@ -99,6 +99,22 @@ final class AuthService {
     }
   }
 
+  /// Réglage « Jeu » (`gamification_enabled`), avec la même mise à jour optimiste.
+  func setGamificationEnabled(_ enabled: Bool) async throws {
+    guard let current = profile, current.gamificationEnabled != enabled else { return }
+    profile?.gamificationEnabled = enabled
+    guard !AppConfig.isDemo else { return }
+    do {
+      try await supabase.from("profiles")
+        .update(["gamification_enabled": enabled])
+        .eq("id", value: current.id)
+        .execute()
+    } catch {
+      profile?.gamificationEnabled = current.gamificationEnabled
+      throw error
+    }
+  }
+
   private func applyDemoSession() {
     profile = DemoData.me
     userId = DemoData.me.id

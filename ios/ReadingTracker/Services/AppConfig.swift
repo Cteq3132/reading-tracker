@@ -78,6 +78,34 @@ enum AppConfig {
     #endif
   }()
 
+  /// Variante de la démo pour les jetons : `-demo-tokens overdrawn` montre un solde « à découvert ».
+  static let demoTokens: String = {
+    #if DEBUG
+    return UserDefaults.standard.string(forKey: "demo-tokens") ?? "positive"
+    #else
+    return "positive"
+    #endif
+  }()
+
+  /// Badge célébré au lancement de la démo : `-demo-celebrate pick_accepted` affiche sa carte.
+  static let demoCelebrate: Badge? = {
+    #if DEBUG
+    guard isDemo else { return nil }
+    return UserDefaults.standard.string(forKey: "demo-celebrate").flatMap(Badge.init(rawValue:))
+    #else
+    return nil
+    #endif
+  }()
+
+  /// Variante de la démo pour le jeu : `-demo-game off` démarre avec le réglage « Jeu » désactivé.
+  static let demoGame: String = {
+    #if DEBUG
+    return UserDefaults.standard.string(forKey: "demo-game") ?? "on"
+    #else
+    return "on"
+    #endif
+  }()
+
   static let demoStartsSignedOut: Bool = {
     #if DEBUG
     return ProcessInfo.processInfo.arguments.contains("-demo-signed-out")

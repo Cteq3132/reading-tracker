@@ -1,13 +1,15 @@
 import SwiftUI
 
-/// Profil : statistiques, objectif PAL, confidentialité du compte, déconnexion.
+/// Profil : statistiques, objectif PAL, badges, réglages du jeu et de la confidentialité, déconnexion.
 struct ProfileView: View {
   @Environment(AuthService.self) private var auth
   @Environment(LibraryService.self) private var library
   @Environment(SocialService.self) private var social
   @Environment(PALService.self) private var pal
+  @Environment(GameService.self) private var game
 
   @State private var confirmSignOut = false
+  @State private var selectedBadge: Badge?
   @State private var showsGoal = false
   @State private var confirmRemoveGoal = false
   @State private var errorMessage: String?
@@ -30,6 +32,12 @@ struct ProfileView: View {
         .listRowInsets(EdgeInsets())
 
         goalSection
+
+        if GameService.isEnabled(auth.profile) {
+          badgesSection
+        }
+
+        gameSection
 
         Section {
           Toggle(isOn: privacyBinding) {
@@ -72,7 +80,71 @@ struct ProfileView: View {
       .sheet(isPresented: $showsGoal) {
         PALGoalSheet(currentSize: library.toReadCount, goal: pal.goal)
       }
+      .sheet(item: $selectedBadge) { badge in
+        badgeSheet(badge)
+      }
     }
+  }
+
+  // MARK: Jeu
+
+  private var badgesSection: some View {
+    Section {
+      BadgeGrid(earned: earnedDates) { selectedBadge = $0 }
+        .padding(.vertical, 12)
+    } header: {
+      HStack {
+        Text("Badges")
+        Spacer()
+        Text("\(game.earned.count) sur \(Badge.allCases.count)")
+          .monospacedDigit()
+      }
+    }
+  }
+
+  private var earnedDates: [Badge: Date] {
+    game.earned.mapValues { $0.earnedDate ?? .now }
+  }
+
+  private func badgeSheet(_ badge: Badge) -> some View {
+    let row = game.earned[badge]
+    let state = game.state(auth: auth, library: library, pal: pal)
+    return BadgeDetailSheet(
+      badge: badge,
+      earnedAt: row.map { $0.earnedDate ?? .now },
+      bookTitle: row?.userBookId.flatMap { library.item(id: $0)?.book?.title },
+      progress: state?.progress(toward: badge, palSize: library.toReadCount, goal: pal.goal)
+    )
+  }
+
+  private var gameSection: some View {
+    Section {
+      Toggle(isOn: gameBinding) {
+        Label("Jeu", systemImage: "gamecontroller")
+      }
+      .disabled(auth.profile?.gamificationStartedAt == nil)
+    } footer: {
+      Text(
+        auth.profile?.gamificationEnabled == false
+          ? "Jetons, série, badges et célébrations sont masqués, pour toi comme pour tes amis."
+          : "Jetons d'achat, série de mois au vert, badges et célébrations. Tes amis voient tes badges."
+      )
+    }
+  }
+
+  private var gameBinding: Binding<Bool> {
+    Binding(
+      get: { auth.profile?.gamificationEnabled ?? true },
+      set: { newValue in
+        Task {
+          do {
+            try await auth.setGamificationEnabled(newValue)
+          } catch {
+            errorMessage = ErrorMessage.from(error)
+          }
+        }
+      }
+    )
   }
 
   // MARK: Objectif PAL

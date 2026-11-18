@@ -7,6 +7,7 @@ struct ReadingTrackerApp: App {
   @State private var search = BookSearchService()
   @State private var social = SocialService()
   @State private var pal = PALService()
+  @State private var game = GameService()
 
   init() {
     // Les couvertures passent par AsyncImage (URLSession.shared) : un cache disque évite de les recharger à chaque écran.
@@ -21,6 +22,7 @@ struct ReadingTrackerApp: App {
         .environment(search)
         .environment(social)
         .environment(pal)
+        .environment(game)
         .environment(\.locale, Locale(identifier: "fr_FR"))
     }
   }
@@ -31,6 +33,7 @@ struct RootView: View {
   @Environment(LibraryService.self) private var library
   @Environment(SocialService.self) private var social
   @Environment(PALService.self) private var pal
+  @Environment(GameService.self) private var game
 
   var body: some View {
     Group {
@@ -48,8 +51,9 @@ struct RootView: View {
     }
     .animation(.default, value: auth.phase)
     .task {
-      library.onStatusChange = { [pal] item, from, to in
+      library.onStatusChange = { [pal, game, auth, library] item, from, to in
         pal.record(userId: item.userId, userBookId: item.id, bookId: item.bookId, from: from, to: to)
+        Self.playGame(after: (from, to), auth: auth, library: library, pal: pal, game: game)
       }
       await auth.start()
     }
@@ -58,8 +62,27 @@ struct RootView: View {
         library.reset()
         social.reset()
         pal.reset()
+        game.reset()
       }
     }
+  }
+
+  /// Après un changement de statut : célébrer un livre fini ou libéré et l'objectif atteint, puis attribuer
+  /// les badges que ce changement fait obtenir. Rien quand le jeu est masqué.
+  private static func playGame(
+    after change: (from: ReadingStatus?, to: ReadingStatus?), auth: AuthService, library: LibraryService,
+    pal: PALService, game: GameService
+  ) {
+    guard GameService.isEnabled(auth.profile) else { return }
+    var celebrates = change.to == .read || change.to == .released
+    if let goal = pal.goal {
+      // La bibliothèque a déjà changé : on retrouve la taille d'avant.
+      let size = library.toReadCount
+      let before = size + (change.from == .toRead ? 1 : 0) - (change.to == .toRead ? 1 : 0)
+      if before > goal.target, size <= goal.target { celebrates = true }
+    }
+    if celebrates { game.celebrate() }
+    Task { await game.evaluate(auth: auth, library: library, pal: pal) }
   }
 }
 
@@ -72,6 +95,7 @@ struct MainTabView: View {
   @Environment(LibraryService.self) private var library
   @Environment(SocialService.self) private var social
   @Environment(PALService.self) private var pal
+  @Environment(GameService.self) private var game
   @State private var selection: AppTab = AppConfig.demoQuery == nil ? .home : .add
 
   var body: some View {
@@ -95,19 +119,29 @@ struct MainTabView: View {
       }
     }
     .tabBarMinimizeBehavior(.onScrollDown)
+    .celebrations()
     .task(id: auth.userId) {
       guard let userId = auth.userId else { return }
-      await MainTabView.refreshAll(userId: userId, library: library, social: social, pal: pal)
+      await MainTabView.refreshAll(userId: userId, auth: auth, library: library, social: social, pal: pal, game: game)
+      if let badge = AppConfig.demoCelebrate { game.showDemoCelebration(badge) }
     }
+    // Un objectif modifié ou le jeu réactivé peuvent faire obtenir un badge.
+    .onChange(of: pal.goal) { Task { await game.evaluate(auth: auth, library: library, pal: pal) } }
+    .onChange(of: auth.profile?.gamificationEnabled) { Task { await game.evaluate(auth: auth, library: library, pal: pal) } }
   }
 }
 
 extension MainTabView {
-  /// Recharge la bibliothèque, les amis, puis l'historique de PAL (le mien et celui des amis suivis).
-  static func refreshAll(userId: UUID, library: LibraryService, social: SocialService, pal: PALService) async {
+  /// Recharge la bibliothèque, les amis, les badges, puis l'historique de PAL (le mien et celui des amis
+  /// suivis), et attribue les badges obtenus depuis le dernier calcul.
+  static func refreshAll(
+    userId: UUID, auth: AuthService, library: LibraryService, social: SocialService, pal: PALService, game: GameService
+  ) async {
     async let a: Void = library.load(userId: userId)
     async let b: Void = social.refresh(userId: userId)
-    _ = await (a, b)
+    async let c: Void = game.loadBadges(userId: userId)
+    _ = await (a, b, c)
     await pal.load(userId: userId, friendIds: social.acceptedFollowingIds)
+    await game.evaluate(auth: auth, library: library, pal: pal)
   }
 }
