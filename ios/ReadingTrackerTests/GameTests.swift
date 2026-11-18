@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import ReadingTracker
 
-/// Moteur de la gamification : jetons, paires neutralisées, période d'installation, mois au vert, série
-/// et badges, dans le fuseau local (règles de « Gamification » dans `docs/CONTRAT.md`).
+/// Moteur de la gamification : défi démarré ou non, places dans la PAL, paires neutralisées, mois au vert,
+/// série et badges, dans le fuseau local (règles de « Gamification » dans `docs/CONTRAT.md`).
 struct GameTests {
   private static let paris: Calendar = {
     var calendar = Calendar(identifier: .gregorian)
@@ -11,7 +11,7 @@ struct GameTests {
     return calendar
   }()
 
-  /// Début du décompte : le 1er juin 2026 à 10 h UTC ; installation jusqu'au 15 juin à 10 h.
+  /// Démarrage du défi : le 1er juin 2026 à 10 h UTC.
   private let start = "2026-06-01T10:00:00Z"
   private let now = "2026-11-18T12:00:00Z"
 
@@ -59,10 +59,10 @@ struct GameTests {
 
   private func badges(_ state: GameState) -> Set<Badge> { Set(state.awards.map(\.badge)) }
 
-  // MARK: Jetons
+  // MARK: Places dans la PAL
 
-  @Test("Une sortie rapporte ½ jeton, une entrée en coûte 1, pour tous les statuts de sortie")
-  func tokens() {
+  @Test("Deux sorties libèrent une place, une entrée en occupe une, pour tous les statuts de sortie")
+  func places() {
     let events = [
       event(nil, .toRead, at: "2026-07-01T10:00:00Z"),
       event(.toRead, .reading, at: "2026-07-02T10:00:00Z"),
@@ -76,38 +76,79 @@ struct GameTests {
       event(nil, .wishlist, at: "2026-07-09T10:00:00Z"),
     ]
     let state = compute(events)
-    #expect(state.tokens.halves == 5 - 4)
-    #expect(state.exitCount == 5)
+    #expect(state.isStarted)
+    #expect(state.places == PALPlaces(exits: 5, entries: 2))
+    // ⌊5 ÷ 2⌋ − 2 = 0.
+    #expect(state.places.free == 0)
+    #expect(state.places.isOneExitAway)
   }
 
-  @Test("Solde négatif : affiché à découvert, sans rien bloquer")
-  func negativeBalance() {
-    let events = (1...3).map { day in event(nil, .toRead, at: "2026-07-0\(day)T10:00:00Z") }
-      + [event(.toRead, .released, at: "2026-07-10T10:00:00Z")]
-    let state = compute(events)
-    #expect(state.tokens.halves == -5)
-    #expect(state.tokens.isOverdrawn)
-    #expect(state.tokens.affordableBooks == 0)
-    #expect(state.tokens.label == "À découvert de 2 jetons ½ : ta PAL te fait crédit")
-    #expect(state.tokens.shortLabel == "à découvert")
+  @Test("Sorties paires : chaque paire libère une place, sans mention de la prochaine")
+  func evenExits() {
+    let events = (1...4).map { day in event(.toRead, .released, at: "2026-07-0\(day)T10:00:00Z") }
+    let places = compute(events).places
+    #expect(places.free == 2)
+    #expect(!places.isOneExitAway)
+    #expect(places.label == "2 places libres")
+    #expect(places.nextPlaceHint == nil)
+    #expect(places.addReminder == "Il te reste 2 places")
   }
 
-  @Test("Textes du solde : arrondi à l'inférieur, ½ jeton quand il reste une demie", arguments: [
-    (0, "0 jeton : chaque sortie de ta PAL en rapporte ½", "0 jeton"),
-    (1, "½ jeton : encore une sortie pour t'offrir un livre", "½ jeton"),
-    (2, "1 jeton : tu peux t'offrir 1 livre", "1 jeton"),
-    (4, "2 jetons : tu peux t'offrir 2 livres", "2 jetons"),
-    (5, "2 jetons : tu peux t'offrir 2 livres", "2 jetons"),
-    (-1, "À découvert de ½ jeton : ta PAL te fait crédit", "à découvert"),
-    (-2, "À découvert de 1 jeton : ta PAL te fait crédit", "à découvert"),
+  @Test("Sorties impaires : arrondi à l'inférieur, et encore 1 sortie pour la prochaine place")
+  func oddExits() {
+    let events = (1...5).map { day in event(.toRead, .released, at: "2026-07-0\(day)T10:00:00Z") }
+    let places = compute(events).places
+    #expect(places.free == 2)
+    #expect(places.isOneExitAway)
+    #expect(places.label == "2 places libres")
+    #expect(places.nextPlaceHint == "encore 1 sortie pour la prochaine place")
+  }
+
+  @Test("Solde négatif : PAL en débord, sans rien bloquer")
+  func overflow() {
+    let events = (1...4).map { day in event(nil, .toRead, at: "2026-07-0\(day)T10:00:00Z") }
+      + [event(.toRead, .released, at: "2026-07-10T10:00:00Z"), event(.toRead, .read, at: "2026-07-11T10:00:00Z"),
+         event(.toRead, .reading, at: "2026-07-12T10:00:00Z")]
+    let places = compute(events).places
+    // ⌊3 ÷ 2⌋ − 4 = −3.
+    #expect(places.free == -3)
+    #expect(places.isOverflowing)
+    #expect(places.label == "PAL en débord de 3")
+    #expect(places.nextPlaceHint == "encore 1 sortie pour la prochaine place")
+    #expect(places.addReminder == "Ta PAL déborde déjà de 3")
+  }
+
+  @Test("Textes des places : nombres entiers, singulier et pluriel", arguments: [
+    (0, 0, "Aucune place libre", "Aucune place libre"),
+    (1, 0, "Aucune place libre", "Aucune place libre"),
+    (2, 0, "1 place libre", "Il te reste 1 place"),
+    (3, 0, "1 place libre", "Il te reste 1 place"),
+    (4, 0, "2 places libres", "Il te reste 2 places"),
+    (2, 1, "Aucune place libre", "Aucune place libre"),
+    (1, 1, "PAL en débord de 1", "Ta PAL déborde déjà de 1"),
+    (0, 3, "PAL en débord de 3", "Ta PAL déborde déjà de 3"),
   ])
-  func tokenLabels(halves: Int, label: String, short: String) {
-    let balance = TokenBalance(halves: halves)
-    #expect(balance.label == label)
-    #expect(balance.shortLabel == short)
+  func placeLabels(exits: Int, entries: Int, label: String, reminder: String) {
+    let places = PALPlaces(exits: exits, entries: entries)
+    #expect(places.label == label)
+    #expect(places.addReminder == reminder)
+    #expect(places.nextPlaceHint == (exits % 2 == 1 ? "encore 1 sortie pour la prochaine place" : nil))
   }
 
-  @Test("Les événements antérieurs au début du décompte ne comptent pas")
+  @Test("Aucune demi-valeur : ni « ½ », ni « jeton », ni virgule dans les textes", arguments: Array(0...9))
+  func noHalves(exits: Int) {
+    for entries in 0...4 {
+      let places = PALPlaces(exits: exits, entries: entries)
+      for text in [places.label, places.addReminder, places.nextPlaceHint ?? ""] {
+        #expect(!text.contains("½"))
+        #expect(!text.lowercased().contains("jeton"))
+        #expect(!text.contains(","))
+        #expect(!text.contains("."))
+      }
+    }
+  }
+
+  @Test("Les événements antérieurs au démarrage du défi ne comptent pas")
   func beforeStart() {
     let events = [
       event(nil, .toRead, at: "2026-05-01T10:00:00Z"),
@@ -115,35 +156,38 @@ struct GameTests {
       event(.toRead, .reading, at: "2026-06-01T09:59:59Z"),
     ]
     let state = compute(events)
-    #expect(state.tokens.halves == 0)
-    #expect(state.exitCount == 0)
+    #expect(state.places == PALPlaces())
     #expect(state.awards.isEmpty)
   }
 
-  // MARK: Période d'installation
-
-  @Test("Fin de la période d'installation : une entrée à J+14 moins une seconde est gratuite, à J+14 elle coûte")
-  func installationEnd() {
-    let free = compute([event(nil, .toRead, at: "2026-06-15T09:59:59Z")])
-    #expect(free.tokens.halves == 0)
-    let paid = compute([event(nil, .toRead, at: "2026-06-15T10:00:00Z")])
-    #expect(paid.tokens.halves == -2)
-    #expect(free.installationEndsAt == instant("2026-06-15T10:00:00Z"))
-    #expect(free.isInstalling(at: instant("2026-06-10T10:00:00Z")))
-    #expect(!free.isInstalling(at: instant("2026-06-15T10:00:00Z")))
+  @Test("Plus de période d'installation : une entrée juste après le démarrage occupe une place")
+  func noInstallationPeriod() {
+    let state = compute([event(nil, .toRead, at: "2026-06-01T10:00:01Z")], now: "2026-06-02T10:00:00Z")
+    #expect(state.places.free == -1)
+    #expect(state.months[MonthKey(year: 2026, month: 6)] == MonthTally(entries: 1, exits: 0))
   }
 
-  @Test("Pendant l'installation, les sorties rapportent et les entrées ne comptent pas dans le mois")
-  func installationMonth() {
+  // MARK: Défi non démarré
+
+  @Test("Défi non démarré : ni places, ni mois au vert, ni série, ni badges")
+  func notStarted() {
+    let book = Item()
     let events = [
-      event(nil, .toRead, at: "2026-06-02T10:00:00Z"),
-      event(nil, .toRead, at: "2026-06-03T10:00:00Z"),
-      event(.toRead, .released, at: "2026-06-05T10:00:00Z"),
-    ]
-    let state = compute(events, now: "2026-06-20T10:00:00Z")
-    #expect(state.tokens.halves == 1)
-    #expect(state.months[MonthKey(year: 2026, month: 6)] == MonthTally(entries: 0, exits: 1))
-    #expect(state.streak == 1)
+      event(book, nil, .toRead, at: "2020-01-01T10:00:00Z"),
+      event(book, .toRead, .reading, at: "2026-11-02T10:00:00Z"),
+    ] + (1...9).map { day in event(.toRead, .released, at: "2026-11-0\(day)T12:00:00Z") }
+    let library = [libraryItem(book, status: .read, pages: 900)] + pile(1)
+    let state = GameEngine.compute(
+      events: events, library: library, goal: PALGoal(target: 2, startSize: 10), startedAt: nil,
+      now: instant(now), calendar: Self.paris
+    )
+    #expect(!state.isStarted)
+    #expect(state == GameState())
+    #expect(state.places.free == 0)
+    #expect(state.months.isEmpty)
+    #expect(state.streak == 0)
+    #expect(state.awards.isEmpty)
+    #expect(state.progress(toward: .tenOut, palSize: 1, goal: nil) == nil)
   }
 
   // MARK: Paires neutralisées
@@ -156,8 +200,7 @@ struct GameTests {
       event(book, .toRead, .released, at: "2026-07-02T09:00:00Z"),
     ]
     let state = compute(events)
-    #expect(state.tokens.halves == 0)
-    #expect(state.exitCount == 0)
+    #expect(state.places == PALPlaces())
     #expect(state.months.isEmpty)
     #expect(state.awards.isEmpty)
   }
@@ -170,8 +213,8 @@ struct GameTests {
       event(book, .toRead, .released, at: "2026-07-02T11:00:00Z"),
     ]
     let state = compute(events)
-    #expect(state.tokens.halves == -1)
-    #expect(state.exitCount == 1)
+    #expect(state.places == PALPlaces(exits: 1, entries: 1))
+    #expect(state.places.free == -1)
     #expect(badges(state).contains(.firstExit))
   }
 
@@ -182,7 +225,7 @@ struct GameTests {
       event(book, nil, .toRead, at: "2026-07-01T10:00:00Z"),
       event(book, .toRead, .reading, at: "2026-07-02T10:00:00Z"),
     ])
-    #expect(state.exitCount == 1)
+    #expect(state.places.exits == 1)
   }
 
   @Test("Ligne supprimée : la paire se reconnaît au book_id, user_book_id étant passé à null")
@@ -195,8 +238,7 @@ struct GameTests {
       // Un autre livre supprimé ne fait pas paire avec celui-ci.
       event(other, .toRead, nil, at: "2026-07-01T13:00:00Z", deleted: true),
     ])
-    #expect(state.exitCount == 1)
-    #expect(state.tokens.halves == 1)
+    #expect(state.places == PALPlaces(exits: 1, entries: 0))
   }
 
   @Test("Paires d'autres livres : seule la sortie du même livre neutralise l'entrée")
@@ -205,7 +247,7 @@ struct GameTests {
       event(Item(), nil, .toRead, at: "2026-07-01T10:00:00Z"),
       event(Item(), .toRead, .released, at: "2026-07-01T11:00:00Z"),
     ])
-    #expect(state.tokens.halves == -1)
+    #expect(state.places == PALPlaces(exits: 1, entries: 1))
   }
 
   // MARK: Mois au vert et série

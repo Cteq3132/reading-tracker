@@ -72,15 +72,34 @@ final class AuthService {
   func loadProfile() async {
     guard let userId, !AppConfig.isDemo else { return }
     do {
-      profile = try await supabase.from("profiles")
-        .select()
-        .eq("id", value: userId)
-        .single()
-        .execute()
-        .value
+      profile = try await fetchProfile(userId)
     } catch {
       profile = nil
     }
+  }
+
+  private func fetchProfile(_ userId: UUID) async throws -> Profile {
+    try await supabase.from("profiles")
+      .select()
+      .eq("id", value: userId)
+      .single()
+      .execute()
+      .value
+  }
+
+  /// Démarre le défi : la RPC `start_challenge()` pose `gamification_started_at` (idempotente), puis le profil
+  /// est rechargé. Définitif : un défi démarré ne se redémarre pas.
+  func startChallenge() async throws {
+    guard let userId, let current = profile, !current.hasStartedChallenge else { return }
+    if AppConfig.isDemo {
+      profile?.gamificationStartedAt = ISO8601DateFormatter().string(from: .now)
+      return
+    }
+    let startedAt: String = try await supabase.rpc("start_challenge").execute().value
+    guard self.userId == userId else { return }
+    profile?.gamificationStartedAt = startedAt
+    // Relecture du profil ; en cas d'échec, la valeur renvoyée par la RPC suffit.
+    if let fresh = try? await fetchProfile(userId), self.userId == userId { profile = fresh }
   }
 
   /// Mise à jour optimiste : l'interface change tout de suite, et revient en arrière si le serveur refuse.

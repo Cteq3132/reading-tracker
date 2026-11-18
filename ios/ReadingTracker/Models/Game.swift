@@ -1,7 +1,7 @@
 import Foundation
 
-// Moteur de la gamification (voir « Gamification » dans `docs/CONTRAT.md`) : jetons d'achat, mois au vert,
-// série et badges, calculés à partir de l'historique `user_book_events`, dans le fuseau local.
+// Moteur de la gamification (voir « Gamification » dans `docs/CONTRAT.md`) : places dans la PAL, mois au
+// vert, série et badges, calculés à partir de l'historique `user_book_events`, dans le fuseau local.
 // Code pur, sans dépendance à l'interface ni au réseau.
 
 // MARK: Catalogue des badges
@@ -72,40 +72,38 @@ enum Badge: String, CaseIterable, Identifiable, Codable, Sendable {
   }
 }
 
-// MARK: Jetons d'achat
+// MARK: Places dans la PAL
 
-/// Solde de jetons, compté en demi-jetons pour rester exact (une sortie rapporte ½ jeton).
-struct TokenBalance: Equatable, Sendable {
-  var halves: Int
+/// Places dans la PAL, en nombres entiers : deux sorties libèrent une place, une entrée en occupe une.
+/// Places = ⌊sorties ÷ 2⌋ − entrées, depuis le démarrage du défi.
+struct PALPlaces: Equatable, Sendable {
+  /// Sorties de PAL comptées depuis le démarrage du défi.
+  var exits = 0
+  /// Entrées en PAL comptées depuis le démarrage du défi.
+  var entries = 0
 
-  var isOverdrawn: Bool { halves < 0 }
-  /// Livres que l'on peut s'offrir : le solde arrondi à l'inférieur, jamais négatif.
-  var affordableBooks: Int { max(halves, 0) / 2 }
+  /// Places libres ; négatif quand la PAL déborde.
+  var free: Int { exits / 2 - entries }
+  var isOverflowing: Bool { free < 0 }
+  /// Nombre impair de sorties : la prochaine sortie libère une place.
+  var isOneExitAway: Bool { exits % 2 == 1 }
 
-  /// Texte de la carte PAL : « 2 jetons : tu peux t'offrir 2 livres », « ½ jeton… », « À découvert… ».
+  /// Texte principal de la carte PAL : « 2 places libres », « Aucune place libre », « PAL en débord de 3 ».
   var label: String {
-    if halves < 0 { return "À découvert de \(Self.amount(-halves)) : ta PAL te fait crédit" }
-    if halves == 0 { return "0 jeton : chaque sortie de ta PAL en rapporte ½" }
-    if halves == 1 { return "½ jeton : encore une sortie pour t'offrir un livre" }
-    let books = affordableBooks
-    return "\(Self.tokens(books)) : tu peux t'offrir \(books) livre\(books > 1 ? "s" : "")"
+    if free < 0 { return "PAL en débord de \(-free)" }
+    if free == 0 { return "Aucune place libre" }
+    return "\(free) place\(free > 1 ? "s" : "") libre\(free > 1 ? "s" : "")"
   }
 
-  /// Rappel court, au moment d'ajouter un livre en PAL : « 2 jetons », « ½ jeton », « à découvert ».
-  var shortLabel: String {
-    if halves < 0 { return "à découvert" }
-    if halves == 1 { return "½ jeton" }
-    return Self.tokens(affordableBooks)
-  }
+  /// Précision sous le texte principal, quand le nombre de sorties est impair.
+  var nextPlaceHint: String? { isOneExitAway ? "encore 1 sortie pour la prochaine place" : nil }
 
-  /// « 1 jeton », « 2 jetons », « 0 jeton ».
-  static func tokens(_ count: Int) -> String { "\(count) jeton\(count > 1 ? "s" : "")" }
-
-  /// Montant exact en demi-jetons : « ½ jeton », « 1 jeton », « 1 jeton ½ ».
-  static func amount(_ halves: Int) -> String {
-    let whole = halves / 2
-    if whole == 0 { return "½ jeton" }
-    return tokens(whole) + (halves % 2 == 1 ? " ½" : "")
+  /// Rappel au moment d'ajouter un livre en PAL : « Il te reste 2 places », « Aucune place libre »,
+  /// « Ta PAL déborde déjà de 1 ».
+  var addReminder: String {
+    if free < 0 { return "Ta PAL déborde déjà de \(-free)" }
+    if free == 0 { return "Aucune place libre" }
+    return "Il te reste \(free) place\(free > 1 ? "s" : "")"
   }
 }
 
@@ -145,7 +143,7 @@ struct MonthKey: Hashable, Comparable, Sendable {
   static func < (a: MonthKey, b: MonthKey) -> Bool { (a.year, a.month) < (b.year, b.month) }
 }
 
-/// Entrées et sorties comptées d'un mois (paires neutralisées et période d'installation exclues).
+/// Entrées et sorties comptées d'un mois (paires neutralisées exclues).
 struct MonthTally: Equatable, Sendable {
   var entries = 0
   var exits = 0
@@ -154,23 +152,19 @@ struct MonthTally: Equatable, Sendable {
 
 /// Tout ce que le jeu affiche, à un instant donné.
 struct GameState: Equatable, Sendable {
-  var tokens = TokenBalance(halves: 0)
+  /// Le défi est démarré (`gamification_started_at` posé) ; sinon rien ne compte et tout reste à zéro.
+  var isStarted = false
+  var places = PALPlaces()
   /// Entrées et sorties comptées, par mois.
   var months: [MonthKey: MonthTally] = [:]
   /// Mois au vert consécutifs jusqu'au mois précédent, plus le mois en cours s'il est déjà au vert.
   var streak = 0
   /// Badges obtenus d'après les règles, dans l'ordre du catalogue.
   var awards: [BadgeAward] = []
-  /// Fin des 14 jours d'installation, pendant lesquels les entrées en PAL ne coûtent rien.
-  var installationEndsAt: Date = .distantPast
-  /// Sorties de PAL comptées depuis le début du décompte.
-  var exitCount = 0
   /// Livres libérés ce mois-ci (progression de `big_cleanup`).
   var releasedThisMonth = 0
 
   var greenMonths: Set<MonthKey> { Set(months.filter { $0.value.isGreen }.keys) }
-
-  func isInstalling(at now: Date) -> Bool { now < installationEndsAt }
 
   func award(_ badge: Badge) -> BadgeAward? { awards.first { $0.badge == badge } }
 }
@@ -180,7 +174,6 @@ struct GameState: Equatable, Sendable {
 enum GameEngine {
   /// Paire neutralisée : une entrée en PAL suivie d'une sortie du même livre en moins de 24 h.
   static let neutralizedPairWindow: TimeInterval = 24 * 3600
-  static let installationDays = 14
   static let pickWindowDays = 7
   static let brickPages = 600
   static let archaeologistYears = 2
@@ -189,19 +182,19 @@ enum GameEngine {
 
   /// Calcule le jeu.
   /// - Parameters:
-  ///   - events: historique du compte, le plus complet possible : les entrées antérieures au début du décompte
+  ///   - events: historique du compte, le plus complet possible : les entrées antérieures au démarrage du défi
   ///     ne comptent pas, mais donnent l'ancienneté d'un livre dans la PAL ;
   ///   - library: bibliothèque actuelle (taille de la PAL, nombre de pages) ;
   ///   - goal: objectif PAL ;
-  ///   - startedAt: `profiles.gamification_started_at` ;
+  ///   - startedAt: `profiles.gamification_started_at` ; `nil` tant que le défi n'est pas démarré, et alors
+  ///     rien ne compte : ni places, ni mois au vert, ni badges ;
   ///   - picks: suggestions de la pioche mémorisées localement.
   static func compute(
-    events: [UserBookEvent], library: [UserBook], goal: PALGoal?, startedAt: Date, picks: [PickSuggestion] = [],
+    events: [UserBookEvent], library: [UserBook], goal: PALGoal?, startedAt: Date?, picks: [PickSuggestion] = [],
     now: Date = .now, calendar: Calendar = PostgresDate.localCalendar
   ) -> GameState {
-    let installationEnd = calendar.date(byAdding: .day, value: installationDays, to: startedAt)
-      ?? startedAt.addingTimeInterval(Double(installationDays) * 86_400)
-    var state = GameState(installationEndsAt: installationEnd)
+    guard let startedAt else { return GameState() }
+    var state = GameState(isStarted: true)
 
     let timeline = chronological(events)
     let neutralized = neutralizedIndices(timeline.map { $0.event }, dates: timeline.map { $0.date })
@@ -217,7 +210,6 @@ enum GameEngine {
     // PAL reconstituée au fil de l'historique : livre → instant de son entrée.
     var pile: [ItemKey: Date] = [:]
     var releasedByMonth: [MonthKey: Set<ItemKey>] = [:]
-    var halves = 0
     /// Dernier instant où chaque mois est passé au vert.
     var turnedGreenAt: [MonthKey: Date] = [:]
 
@@ -231,20 +223,19 @@ enum GameEngine {
       guard date >= startedAt, date <= now, !neutralized.contains(index) else { continue }
       let month = MonthKey(date, calendar: calendar)
 
-      if event.isPALEntry, date >= installationEnd {
-        halves -= 2
+      if event.isPALEntry {
+        state.places.entries += 1
         state.months[month, default: MonthTally()].entries += 1
       }
 
       if event.isPALExit {
-        halves += 1
-        state.exitCount += 1
+        state.places.exits += 1
         let wasGreen = state.months[month]?.isGreen == true
         state.months[month, default: MonthTally()].exits += 1
         if !wasGreen, state.months[month]?.isGreen == true { turnedGreenAt[month] = date }
 
         grant(.firstExit, at: date, book: event.userBookId)
-        if state.exitCount >= tenOutCount { grant(.tenOut, at: date, book: event.userBookId) }
+        if state.places.exits >= tenOutCount { grant(.tenOut, at: date, book: event.userBookId) }
 
         if let enteredAt, let limit = calendar.date(byAdding: .year, value: archaeologistYears, to: enteredAt),
            date > limit {
@@ -281,7 +272,6 @@ enum GameEngine {
 
     let currentMonth = MonthKey(now, calendar: calendar)
     let green = state.greenMonths
-    state.tokens = TokenBalance(halves: halves)
     state.streak = streak(green: green, current: currentMonth)
 
     // Mois au vert d'après leur bilan final (celui du mois en cours s'il est déjà au vert).
@@ -371,9 +361,10 @@ extension GameState {
   /// série perdue : le jeu ne punit pas.
   func progress(toward badge: Badge, palSize: Int, goal: PALGoal?, now: Date = .now,
                 calendar: Calendar = PostgresDate.localCalendar) -> String? {
+    guard isStarted else { return nil }
     switch badge {
     case .tenOut:
-      let count = min(exitCount, GameEngine.tenOutCount)
+      let count = min(places.exits, GameEngine.tenOutCount)
       return "\(count) sortie\(count > 1 ? "s" : "") sur \(GameEngine.tenOutCount)"
     case .bigCleanup:
       let count = min(releasedThisMonth, GameEngine.bigCleanupCount)
