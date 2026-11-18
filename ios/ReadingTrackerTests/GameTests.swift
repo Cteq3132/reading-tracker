@@ -405,7 +405,7 @@ struct GameTests {
     #expect(state(size: 4).award(.goalReached) == nil)
   }
 
-  @Test("Pavé : finir un livre de plus de 600 pages, déjà dans la bibliothèque")
+  @Test("Pavé : finir (passer à read) un livre de plus de 600 pages, même ajouté directement comme lu")
   func brick() {
     let big = Item(), small = Item(), added = Item()
     let library = [
@@ -413,14 +413,11 @@ struct GameTests {
       libraryItem(small, status: .read, pages: 600),
       libraryItem(added, status: .read, pages: 900),
     ]
-    let state = compute([
-      event(small, .reading, .read, at: "2026-07-01T10:00:00Z"),
-      // Ajouté directement comme lu : ce n'est pas le finir.
-      event(added, nil, .read, at: "2026-07-02T10:00:00Z"),
-    ], library: library)
-    #expect(state.award(.brick) == nil)
+    #expect(compute([event(small, .reading, .read, at: "2026-07-01T10:00:00Z")], library: library).award(.brick) == nil)
     let finished = compute([event(big, .reading, .read, at: "2026-07-03T10:00:00Z")], library: library)
     #expect(finished.award(.brick)?.userBookId == big.row)
+    let logged = compute([event(added, nil, .read, at: "2026-07-02T10:00:00Z")], library: library)
+    #expect(logged.award(.brick)?.userBookId == added.row)
   }
 
   @Test("Dix de moins : la dixième sortie comptée")

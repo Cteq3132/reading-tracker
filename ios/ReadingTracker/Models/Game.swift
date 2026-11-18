@@ -265,8 +265,8 @@ enum GameEngine {
         }
       }
 
-      // Finir un livre déjà dans la bibliothèque (pas l'y ajouter directement comme lu).
-      if event.toStatus == .read, event.fromStatus != nil, (pages[event.bookId] ?? 0) > brickPages {
+      // Finir un livre : tout passage à `read`, y compris l'ajout d'un livre comme lu (règle du contrat).
+      if event.toStatus == .read, event.fromStatus != .read, (pages[event.bookId] ?? 0) > brickPages {
         grant(.brick, at: date, book: event.userBookId)
       }
 
@@ -349,15 +349,16 @@ enum GameEngine {
   /// (`user_book_id` passe alors à `null` sur tous ses événements).
   struct ItemKey: Hashable {
     let id: UUID
-    let isRow: Bool
+    /// `id` est celui de la ligne `user_books` (sinon celui de la fiche `books`).
+    let isUserBookRow: Bool
 
     init(_ event: UserBookEvent) {
       if let row = event.userBookId {
         id = row
-        isRow = true
+        isUserBookRow = true
       } else {
         id = event.bookId
-        isRow = false
+        isUserBookRow = false
       }
     }
   }

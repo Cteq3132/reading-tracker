@@ -41,11 +41,11 @@ struct AddStatusMenu<MenuLabel: View>: View {
     return "\(size) · \(reminder)"
   }
 
-  /// Rappel du solde de jetons, si le jeu est affiché : « 2 jetons », « à découvert », ou un ajout gratuit
-  /// pendant la période d'installation.
+  /// Rappel du solde de jetons, si le jeu est affiché : « 2 jetons », « à découvert », précisé d'un ajout
+  /// gratuit pendant la période d'installation.
   private var tokenReminder: String? {
     guard let state = game.state(auth: auth, library: library, pal: pal) else { return nil }
-    if state.isInstalling(at: .now) { return "ajout gratuit" }
+    if state.isInstalling(at: .now) { return "\(state.tokens.shortLabel), ajout gratuit" }
     return state.tokens.shortLabel
   }
 }

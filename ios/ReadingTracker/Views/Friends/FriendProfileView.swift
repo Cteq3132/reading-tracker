@@ -13,18 +13,16 @@ struct FriendProfileView: View {
   @State private var badgesLoaded = false
   @State private var selectedBadge: Badge?
 
-  /// Le jeu est affiché chez moi comme chez lui : sinon, rien du jeu n'apparaît.
-  private var showsGame: Bool { GameService.isEnabled(auth.profile) && profile.gamificationEnabled }
+  /// Le jeu est affiché chez moi comme chez lui, et ses badges sont lisibles (profil public ou suivi) :
+  /// sinon, rien du jeu n'apparaît.
+  private var showsGame: Bool {
+    GameService.isEnabled(auth.profile) && profile.gamificationEnabled
+      && (!profile.isPrivate || social.outgoing[profile.id] == .accepted)
+  }
 
   private var activity: [FriendActivity] { social.activity.filter { $0.userId == profile.id } }
 
-  private var earned: [Badge: Date] {
-    var result: [Badge: Date] = [:]
-    for row in badges {
-      if let badge = row.badge { result[badge] = row.earnedDate ?? .now }
-    }
-    return result
-  }
+  private var earned: [Badge: Date] { UserBadge.dates(badges) }
 
   var body: some View {
     List {

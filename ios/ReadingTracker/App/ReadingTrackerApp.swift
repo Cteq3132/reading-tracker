@@ -53,7 +53,7 @@ struct RootView: View {
     .task {
       library.onStatusChange = { [pal, game, auth, library] item, from, to in
         pal.record(userId: item.userId, userBookId: item.id, bookId: item.bookId, from: from, to: to)
-        Self.playGame(after: (from, to), auth: auth, library: library, pal: pal, game: game)
+        game.statusDidChange(from: from, to: to, auth: auth, library: library, pal: pal)
       }
       await auth.start()
     }
@@ -65,24 +65,6 @@ struct RootView: View {
         game.reset()
       }
     }
-  }
-
-  /// Après un changement de statut : célébrer un livre fini ou libéré et l'objectif atteint, puis attribuer
-  /// les badges que ce changement fait obtenir. Rien quand le jeu est masqué.
-  private static func playGame(
-    after change: (from: ReadingStatus?, to: ReadingStatus?), auth: AuthService, library: LibraryService,
-    pal: PALService, game: GameService
-  ) {
-    guard GameService.isEnabled(auth.profile) else { return }
-    var celebrates = change.to == .read || change.to == .released
-    if let goal = pal.goal {
-      // La bibliothèque a déjà changé : on retrouve la taille d'avant.
-      let size = library.toReadCount
-      let before = size + (change.from == .toRead ? 1 : 0) - (change.to == .toRead ? 1 : 0)
-      if before > goal.target, size <= goal.target { celebrates = true }
-    }
-    if celebrates { game.celebrate() }
-    Task { await game.evaluate(auth: auth, library: library, pal: pal) }
   }
 }
 
@@ -126,8 +108,12 @@ struct MainTabView: View {
       if let badge = AppConfig.demoCelebrate { game.showDemoCelebration(badge) }
     }
     // Un objectif modifié ou le jeu réactivé peuvent faire obtenir un badge.
-    .onChange(of: pal.goal) { Task { await game.evaluate(auth: auth, library: library, pal: pal) } }
-    .onChange(of: auth.profile?.gamificationEnabled) { Task { await game.evaluate(auth: auth, library: library, pal: pal) } }
+    .onChange(of: pal.goal) { reevaluate() }
+    .onChange(of: auth.profile?.gamificationEnabled) { reevaluate() }
+  }
+
+  private func reevaluate() {
+    Task { await game.evaluate(auth: auth, library: library, pal: pal) }
   }
 }
 
