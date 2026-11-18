@@ -18,9 +18,10 @@ Unshelf : entrées et sorties de PAL dans user_book_events, status_changed_at,
 droits de lecture des événements, objectif PAL privé (pal_goals) et reprise de l'existant.
 
 Gamification : gamification_enabled et gamification_started_at dans profiles,
-badges de user_badges (insertion idempotente, ni modification ni suppression,
-visibilité selon le follow et le réglage du jeu). Les badges des comptes de
-test sont effacés avec la CLI, avant et après les contrôles.
+démarrage du défi par start_challenge(), badges de user_badges (insertion
+idempotente, ni modification ni suppression, visibilité selon le follow et le
+réglage du jeu). Les badges des comptes de test sont effacés et leur défi remis
+à null (non démarré) avec la CLI, avant et après les contrôles.
 
 ENV_LOCAL permet de désigner un autre fichier que .env.local à la racine.
 """
@@ -794,58 +795,84 @@ def section_gamification_sql():
              has_table_privilege(r.role, 'public.user_badges', 'select') as badges_read,
              has_any_column_privilege(r.role, 'public.user_badges', 'insert') as badges_insert,
              has_any_column_privilege(r.role, 'public.user_badges', 'update')
-               or has_table_privilege(r.role, 'public.user_badges', 'delete,truncate') as badges_change
+               or has_table_privilege(r.role, 'public.user_badges', 'delete,truncate') as badges_change,
+             has_function_privilege(r.role, 'public.start_challenge()', 'execute') as start_challenge
         from unnest(array['anon', 'authenticated']) as r(role)""")
     print("droits gamification:", show(rights))
     by_role = {r.pop("role"): r for r in rights}
     check("droits : anon n'a rien ; authenticated modifie gamification_enabled mais pas gamification_started_at, "
-          "lit et ajoute des badges, sans les modifier ni les supprimer",
+          "appelle start_challenge(), lit et ajoute des badges, sans les modifier ni les supprimer",
           not any(by_role["anon"].values())
           and by_role["authenticated"] == {"enabled_update": True, "started_write": False, "badges_read": True,
-                                           "badges_insert": True, "badges_change": False}, show(by_role))
+                                           "badges_insert": True, "badges_change": False,
+                                           "start_challenge": True}, show(by_role))
 
-    # Comptes existants : l'heure de la migration, la même pour tous. Comptes
-    # créés depuis : created_at et gamification_started_at viennent du même
-    # now(), celui de l'insertion faite par handle_new_user. Le projet comptait
-    # au moins trois profils avant la migration (A, B et un vrai compte) : le
-    # groupe « heure de la migration » en a au moins trois.
-    profiles = sql("""
-      select gamification_started_at = created_at as at_signup,
-             gamification_started_at::text as started,
-             gamification_started_at > created_at as after_creation
-        from public.profiles""")
-    migrated = {p["started"] for p in profiles if not p["at_signup"]}
-    print(f"gamification_started_at : {len(profiles)} profils, {sum(p['at_signup'] for p in profiles)} "
-          f"à l'inscription, les autres à {sorted(migrated)}")
-    check("comptes existants : gamification_started_at = heure de la migration, la même pour tous et après leur "
-          "création ; comptes plus récents : heure de l'inscription",
-          len(migrated) == 1 and sum(not p["at_signup"] for p in profiles) >= 3
-          and all(p["at_signup"] or p["after_creation"] for p in profiles), show(profiles)[:300])
-    signup = sql("""
-      select pg_get_expr(d.adbin, d.adrelid) as col_default,
+    # Inscription : sans défaut, et handle_new_user ne pose pas la colonne, donc
+    # un nouveau compte démarre à null. start_challenge est security definer
+    # avec un search_path vide, comme les autres RPC.
+    shape = sql("""
+      select a.attnotnull as not_null,
+             a.atthasdef as has_default,
              position('gamification_started_at' in pg_get_functiondef('public.handle_new_user()'::regprocedure)) = 0
-               as not_in_trigger
-        from pg_attrdef d
-        join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
-       where d.adrelid = 'public.profiles'::regclass and a.attname = 'gamification_started_at'""")
-    check("inscription : handle_new_user crée le profil sans gamification_started_at, dont le défaut est now()",
-          signup == [{"col_default": "now()", "not_in_trigger": True}], show(signup))
+               as not_in_trigger,
+             f.prosecdef as security_definer,
+             f.proconfig as config,
+             f.prorettype = 'timestamptz'::regtype as returns_timestamptz
+        from pg_attribute a, pg_proc f
+       where a.attrelid = 'public.profiles'::regclass and a.attname = 'gamification_started_at'
+         and f.oid = 'public.start_challenge()'::regprocedure""")
+    check("gamification_started_at nullable et sans défaut, absent de handle_new_user ; start_challenge() "
+          "security definer, search_path fixé, renvoie timestamptz",
+          shape == [{"not_null": False, "has_default": False, "not_in_trigger": True, "security_definer": True,
+                     "config": ["search_path=\"\""], "returns_timestamptz": True}], show(shape))
 
 
 def section_gamification_rest():
     a_profile = f"/rest/v1/profiles?id=eq.{A['id']}"
     a_game = a_profile + "&select=gamification_enabled,gamification_started_at"
+    b_game = f"/rest/v1/profiles?id=eq.{B['id']}&select=gamification_started_at"
     profile = rows(a_game, A["token"])[0]
     print("gamification de A :", show(profile))
-    check("profil : gamification_enabled vrai par défaut, gamification_started_at posé",
-          profile["gamification_enabled"] is True and profile["gamification_started_at"] is not None, show(profile))
-    for body in ({"gamification_started_at": "2000-01-01T00:00:00Z"},
-                 {"gamification_enabled": False, "gamification_started_at": "2000-01-01T00:00:00Z"}):
-        status, res = call("PATCH", a_profile, A["token"], body)
-        check(f"gamification_started_at non modifiable par le client ({', '.join(body)})",
-              status in (401, 403), f"HTTP {status} {show(res)[:120]}")
-    after_refusals = rows(a_game, A["token"])[0]
-    check("après ces refus, le profil de A est inchangé", after_refusals == profile, show(after_refusals))
+    check("profil : gamification_enabled vrai par défaut, défi non démarré (gamification_started_at null)",
+          profile["gamification_enabled"] is True and profile["gamification_started_at"] is None, show(profile))
+
+    # Écriture directe refusée, que le défi soit démarré ou non, et quelle que
+    # soit la valeur envoyée (une date, ou null pour le redémarrer).
+    def refuse_direct_writes(when):
+        before = rows(a_game, A["token"])[0]
+        for body in ({"gamification_started_at": "2000-01-01T00:00:00Z"},
+                     {"gamification_started_at": None},
+                     {"gamification_enabled": False, "gamification_started_at": "2000-01-01T00:00:00Z"}):
+            status, res = call("PATCH", a_profile, A["token"], body)
+            check(f"{when} : écriture directe de gamification_started_at refusée ({show(body)})",
+                  status in (401, 403), f"HTTP {status} {show(res)[:120]}")
+        after = rows(a_game, A["token"])[0]
+        check(f"{when} : après ces refus, le profil de A est inchangé", after == before, show(after))
+
+    refuse_direct_writes("défi non démarré")
+
+    status, res = call("POST", "/rest/v1/rpc/start_challenge", None, {})
+    check("start_challenge refusée sans session", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
+
+    t0 = datetime.now().astimezone()
+    status, started = call("POST", "/rest/v1/rpc/start_challenge", A["token"], {})
+    stored = rows(a_game, A["token"])[0]["gamification_started_at"]
+    print(f"start_challenge par A → HTTP {status}, {show(started)} ; en base : {stored}")
+    check("start_challenge() pose la date du jour et la renvoie",
+          status == 200 and isinstance(started, str) and stored is not None
+          and parse_ts(started) == parse_ts(stored) and abs((parse_ts(started) - t0).total_seconds()) < 120,
+          f"HTTP {status} {show(started)} {stored}")
+    time.sleep(1.1)
+    status, again = call("POST", "/rest/v1/rpc/start_challenge", A["token"], {})
+    check("second appel : même date renvoyée, le défi ne redémarre pas",
+          status == 200 and isinstance(again, str) and parse_ts(again) == parse_ts(started)
+          and rows(a_game, A["token"])[0]["gamification_started_at"] == stored, f"HTTP {status} {show(again)}")
+    check("start_challenge() de A ne touche pas B (toujours non démarré)",
+          rows(b_game, B["token"]) == [{"gamification_started_at": None}], show(rows(b_game, B["token"])))
+    check("A lit la date de défi de B (null) comme le reste du profil", rows(b_game, A["token"]) == rows(b_game, B["token"]))
+
+    refuse_direct_writes("défi démarré")
+    profile = rows(a_game, A["token"])[0]
     def set_game(path, token, enabled):
         return call("PATCH", path, token, {"gamification_enabled": enabled}, {"Prefer": "return=representation"})
 
@@ -939,20 +966,22 @@ def section_gamification_rest():
     check("user_badges refusée sans session", status in (401, 403) or res == [], f"HTTP {status} {show(res)[:120]}")
 
 
-def clear_test_badges():
-    """Badges des comptes de test, et historique orphelin du livre supprimé."""
+def reset_test_gamification():
+    """Badges des comptes de test, défi non démarré, et historique orphelin du livre supprimé."""
     sql(f"delete from public.user_badges where user_id in ('{A['id']}', '{B['id']}')", write=True)
+    sql(f"update public.profiles set gamification_started_at = null where id in ('{A['id']}', '{B['id']}')",
+        write=True)
     sql(f"delete from public.user_book_events where user_book_id is null "
         f"and user_id in ('{A['id']}', '{B['id']}')", write=True)
 
 
 try:
     section_gamification_sql()
-    clear_test_badges()
+    reset_test_gamification()
     try:
         section_gamification_rest()
     finally:
-        clear_test_badges()
+        reset_test_gamification()
 except (RuntimeError, subprocess.TimeoutExpired, FileNotFoundError) as error:
     check("contrôles gamification (CLI supabase requise)", False, str(error)[:300])
 except (KeyError, IndexError, TypeError, ValueError) as error:
