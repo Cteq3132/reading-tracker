@@ -29,11 +29,12 @@ Toute évolution du schéma ou de l'API se fait ici d'abord.
 | display_name | text | |
 | avatar_url | text | |
 | is_private | bool default false | privé ⇒ les follows passent par une demande |
-| gamification_enabled | bool not null default true | le jeu (jetons, badges, séries, célébrations) est affiché ; `false` le masque aussi aux amis |
-| gamification_started_at | timestamptz not null default now() | début du décompte des jetons et des mois au vert ; vaut `now()` à la migration pour les comptes existants, et l'heure d'inscription pour les nouveaux ; non modifiable par le client |
+| gamification_enabled | bool not null default true | le jeu (places, badges, séries, célébrations) est affiché ; `false` le masque aussi aux amis |
+| gamification_started_at | timestamptz | début du défi ; `null` tant que l'utilisateur ne l'a pas démarré ; posé uniquement par la RPC `start_challenge()` ; non modifiable directement par le client |
 | created_at | timestamptz | |
 
 RLS : lecture pour tout utilisateur connecté ; mise à jour de sa propre ligne seulement (sauf `gamification_started_at`).
+RPC `start_challenge() returns timestamptz` (security definer) : pose `gamification_started_at = now()` pour `auth.uid()` si la valeur est `null`, et renvoie la valeur en place (idempotente : un défi démarré ne se redémarre pas). Migration : tous les comptes existants repassent à `null` ; les nouveaux comptes démarrent à `null`.
 
 ### `pal_goals` — objectif PAL, privé
 | colonne | type | note |
@@ -151,15 +152,18 @@ Le calcul des badges se fait dans l'app, qui insère les badges obtenus (`insert
 
 Le jeu porte sur ce qui **sort** de la PAL, jamais sur la quantité lue. Rien ne punit : pas de série perdue mise en avant, et tout disparaît si `gamification_enabled` est faux (réglage dans le Profil). Tout se calcule dans l'app, dans le fuseau local, à partir de `user_book_events` postérieurs à `gamification_started_at`.
 
+**Démarrage du défi** : rien ne compte (ni places, ni mois au vert, ni badges) tant que `gamification_started_at` est `null`. L'app propose « Démarrer le défi » : sur la carte PAL de l'Accueil tant que le défi n'est pas démarré, et dans le Profil. Le texte explique que la PAL du moment devient le point de départ et qu'à partir de là chaque entrée et chaque sortie comptent. Il n'y a pas de période gratuite.
+
 **Paires neutralisées (anti-triche)** : une entrée en PAL suivie d'une sortie du même `user_book_id` (ou du même `book_id` si la ligne a été supprimée) en moins de 24 h ne compte ni comme entrée ni comme sortie.
 
-**Jetons d'achat**
-- Chaque sortie de PAL rapporte ½ jeton : vers `reading`, `read`, `abandoned`, `released`, ou suppression d'une ligne `to_read`.
-- Chaque entrée en PAL coûte 1 jeton : insertion en `to_read`, ou passage d'un autre statut vers `to_read`.
-- **Période d'installation** : les entrées des 14 premiers jours après `gamification_started_at` ne coûtent rien, pour que l'on puisse saisir sa PAL existante sans partir dans le rouge.
-- Solde = sorties × 0,5 − entrées. Affiché sur la carte PAL de l'Accueil (« 2 jetons : tu peux t'offrir 2 livres », arrondi à l'inférieur ; « ½ jeton » quand il reste une demie). Un solde négatif s'affiche « à découvert », avec humour, sans rien bloquer. Au moment d'ajouter un livre en PAL, l'app rappelle le solde.
+**Places dans la PAL** (remplacent les jetons ; aucun vocabulaire d'achat, uniquement des nombres entiers)
+- **Deux sorties de PAL libèrent une place** : sorties vers `reading`, `read`, `abandoned`, `released`, ou suppression d'une ligne `to_read`.
+- **Chaque entrée en PAL occupe une place** : insertion en `to_read`, ou passage d'un autre statut vers `to_read`.
+- Places = ⌊sorties ÷ 2⌋ − entrées, depuis le démarrage du défi. Jamais de demi-place affichée.
+- Affichage sur la carte PAL de l'Accueil : « 2 places libres », et quand le nombre de sorties est impair, « encore 1 sortie pour la prochaine place ». À 0 : « Aucune place libre ». Négatif : « PAL en débord de 3 », sans culpabiliser et sans rien bloquer.
+- Au moment d'ajouter un livre en PAL, l'app rappelle les places (« Il te reste 2 places » ou « Ta PAL déborde déjà de 1 »).
 
-**Mois au vert** : un mois civil (fuseau local) où les sorties dépassent les entrées, paires neutralisées exclues, période d'installation exclue des entrées. La série courante = nombre de mois au vert consécutifs jusqu'au mois précédent, plus le mois en cours s'il est déjà au vert. Affichée discrètement sur la carte PAL (« 🔥 4 mois au vert ») ; une série à 0 n'est pas affichée.
+**Mois au vert** : un mois civil (fuseau local) où les sorties dépassent les entrées, paires neutralisées exclues, en ne comptant que les événements postérieurs au démarrage du défi. La série courante = nombre de mois au vert consécutifs jusqu'au mois précédent, plus le mois en cours s'il est déjà au vert. Affichée discrètement sur la carte PAL (« 🔥 4 mois au vert ») ; une série à 0 n'est pas affichée.
 
 **Catalogue des badges** (identifiants stables, libellés en français dans l'app) :
 | `badge_id` | nom | règle |
@@ -264,4 +268,4 @@ Supabase Auth applique ses propres limites par IP (`[auth.rate_limit]` dans `sup
 - Onglets : **Accueil** (date et salut ; carte PAL en tête : taille actuelle, entrées, sorties et solde du mois, progression de l'objectif ; « Piocher dans ma PAL » : au hasard, le plus ancien ou le plus court, puis « Commencer » ; lectures en cours avec mise à jour rapide de la page ; 3 dernières activités des amis, dont leurs progrès de PAL), **Bibliothèque** (En cours / PAL / Envies / Lus / Abandonnés et libérés ; dans la PAL : ancienneté de chaque livre, tri par ancienneté ou par nombre de pages, action « Libérer »), **Amis** (activité, recherche de comptes, demandes), **Profil**. **Ajouter** (recherche et scan ISBN) est l'onglet de recherche iOS 26 (`Tab(role: .search)`), affiché à part dans la tab bar ; l'Accueil y mène aussi.
 - À l'ajout d'un livre, l'app demande son statut : PAL (je l'ai), Envies, En cours ou Lu ; en choisissant PAL, elle rappelle discrètement la taille actuelle de la PAL.
 - Objectif PAL : réglable dans le Profil (taille visée, échéance facultative).
-- Gamification (voir la section dédiée) : jetons et série de mois au vert sur la carte PAL de l'Accueil ; badges obtenus et à obtenir dans le Profil, et ceux d'un ami sur son profil ; réglage « Jeu » dans le Profil pour tout masquer.
+- Gamification (voir la section dédiée) : « Démarrer le défi » tant qu'il n'est pas démarré, puis places et série de mois au vert sur la carte PAL de l'Accueil ; badges obtenus et à obtenir dans le Profil, et ceux d'un ami sur son profil ; réglage « Jeu » dans le Profil pour tout masquer.
