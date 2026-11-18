@@ -17,6 +17,11 @@ compte qui possède le projet), puis les remet en état.
 Unshelf : entrées et sorties de PAL dans user_book_events, status_changed_at,
 droits de lecture des événements, objectif PAL privé (pal_goals) et reprise de l'existant.
 
+Gamification : gamification_enabled et gamification_started_at dans profiles,
+badges de user_badges (insertion idempotente, ni modification ni suppression,
+visibilité selon le follow et le réglage du jeu). Les badges des comptes de
+test sont effacés avec la CLI, avant et après les contrôles.
+
 ENV_LOCAL permet de désigner un autre fichier que .env.local à la racine.
 """
 import json
@@ -114,7 +119,7 @@ if all(f"TEST_USER_{w}_EMAIL" in existing for w in "AB"):
     for acc in (A, B):
         call("DELETE", f"/rest/v1/user_books?user_id=eq.{acc['id']}", acc["token"])
         call("PATCH", f"/rest/v1/profiles?id=eq.{acc['id']}", acc["token"],
-             {"is_private": False})
+             {"is_private": False, "gamification_enabled": True})
         call("DELETE", f"/rest/v1/pal_goals?user_id=eq.{acc['id']}", acc["token"])
     print("Comptes A et B réutilisés, données remises à zéro.")
 
@@ -774,6 +779,155 @@ try:
     section_unshelf_sql()
 except (RuntimeError, subprocess.TimeoutExpired, FileNotFoundError) as error:
     check("contrôles SQL Unshelf (CLI supabase requise)", False, str(error)[:300])
+
+
+# 9. Gamification ------------------------------------------------------------
+def badges_of(user_id, token):
+    return rows(f"/rest/v1/user_badges?user_id=eq.{user_id}&select=badge_id&order=badge_id", token)
+
+
+def section_gamification_sql():
+    rights = sql("""
+      select r.role,
+             has_column_privilege(r.role, 'public.profiles', 'gamification_enabled', 'update') as enabled_update,
+             has_column_privilege(r.role, 'public.profiles', 'gamification_started_at', 'insert,update') as started_write,
+             has_table_privilege(r.role, 'public.user_badges', 'select') as badges_read,
+             has_any_column_privilege(r.role, 'public.user_badges', 'insert') as badges_insert,
+             has_table_privilege(r.role, 'public.user_badges', 'update,delete,truncate') as badges_change
+        from unnest(array['anon', 'authenticated']) as r(role)""")
+    print("droits gamification:", show(rights))
+    by_role = {r.pop("role"): r for r in rights}
+    check("droits : anon n'a rien ; authenticated modifie gamification_enabled mais pas gamification_started_at, "
+          "lit et ajoute des badges, sans les modifier ni les supprimer",
+          not any(by_role["anon"].values())
+          and by_role["authenticated"] == {"enabled_update": True, "started_write": False, "badges_read": True,
+                                           "badges_insert": True, "badges_change": False}, show(by_role))
+
+    # Comptes existants : l'heure de la migration, la même pour tous. Comptes
+    # créés depuis : created_at et gamification_started_at viennent du même
+    # now(), celui de l'insertion faite par handle_new_user.
+    profiles = sql("""
+      select gamification_started_at = created_at as at_signup,
+             gamification_started_at::text as started,
+             gamification_started_at > created_at as after_creation
+        from public.profiles""")
+    migrated = {p["started"] for p in profiles if not p["at_signup"]}
+    print(f"gamification_started_at : {len(profiles)} profils, {sum(p['at_signup'] for p in profiles)} "
+          f"à l'inscription, les autres à {sorted(migrated)}")
+    check("comptes existants : gamification_started_at = heure de la migration, la même pour tous et après leur "
+          "création ; comptes plus récents : heure de l'inscription",
+          len(migrated) == 1 and sum(not p["at_signup"] for p in profiles) >= 3
+          and all(p["at_signup"] or p["after_creation"] for p in profiles), show(profiles)[:300])
+    signup = sql("""
+      select pg_get_expr(d.adbin, d.adrelid) as col_default,
+             position('gamification_started_at' in pg_get_functiondef('public.handle_new_user()'::regprocedure)) = 0
+               as not_in_trigger
+        from pg_attrdef d
+        join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum
+       where d.adrelid = 'public.profiles'::regclass and a.attname = 'gamification_started_at'""")
+    check("inscription : handle_new_user crée le profil sans gamification_started_at, dont le défaut est now()",
+          signup == [{"col_default": "now()", "not_in_trigger": True}], show(signup))
+
+
+def section_gamification_rest():
+    me = f"/rest/v1/profiles?id=eq.{A['id']}"
+    profile = rows(me + "&select=gamification_enabled,gamification_started_at", A["token"])[0]
+    print("gamification de A :", show(profile))
+    check("profil : gamification_enabled vrai par défaut, gamification_started_at posé",
+          profile["gamification_enabled"] is True and profile["gamification_started_at"] is not None, show(profile))
+    for body in ({"gamification_started_at": "2000-01-01T00:00:00Z"},
+                 {"gamification_enabled": False, "gamification_started_at": "2000-01-01T00:00:00Z"}):
+        status, res = call("PATCH", me, A["token"], body)
+        check(f"gamification_started_at non modifiable par le client ({', '.join(body)})",
+              status in (401, 403), f"HTTP {status} {show(res)[:120]}")
+    after = rows(me + "&select=gamification_enabled,gamification_started_at", A["token"])[0]
+    check("après ces refus, le profil de A est inchangé", after == profile, show(after))
+    status, res = call("PATCH", me, A["token"], {"gamification_enabled": False}, {"Prefer": "return=representation"})
+    check("A masque le jeu (gamification_enabled = false)",
+          status == 200 and res[0]["gamification_enabled"] is False
+          and res[0]["gamification_started_at"] == profile["gamification_started_at"], show(res)[:200])
+    call("PATCH", me, A["token"], {"gamification_enabled": True})
+
+    # Insertion d'un badge, rattaché à un livre de A.
+    ub_a = rows(f"/rest/v1/user_books?user_id=eq.{A['id']}&book_id=eq.{book_id}&select=id", A["token"])[0]["id"]
+    status, res = call("POST", "/rest/v1/user_badges", A["token"], {"badge_id": "first_exit", "user_book_id": ub_a},
+                       {"Prefer": "return=representation"})
+    badge = res[0] if status == 201 and res else {}
+    print("badge de A :", show(res))
+    check("A obtient un badge : user_id = auth.uid(), earned_at posé, livre rattaché",
+          badge.get("user_id") == A["id"] and badge.get("badge_id") == "first_exit"
+          and badge.get("earned_at") is not None and badge.get("user_book_id") == ub_a, f"HTTP {status} {show(res)}")
+    for label, path in (("Prefer: resolution=ignore-duplicates", "/rest/v1/user_badges"),
+                        ("on_conflict=user_id,badge_id", "/rest/v1/user_badges?on_conflict=user_id,badge_id")):
+        status, res = call("POST", path, A["token"], {"badge_id": "first_exit"},
+                           {"Prefer": "resolution=ignore-duplicates,return=representation"})
+        check(f"badge déjà obtenu, on conflict do nothing ({label}) : accepté, rien d'inséré",
+              status in (200, 201) and res == [], f"HTTP {status} {show(res)[:120]}")
+    status, res = call("POST", "/rest/v1/user_badges", A["token"], {"badge_id": "first_exit"})
+    check("badge déjà obtenu, sans on conflict : conflit (HTTP 409)", status == 409, f"HTTP {status}")
+    mine = rows(f"/rest/v1/user_badges?user_id=eq.{A['id']}&select=*", A["token"])
+    check("un seul exemplaire du badge, earned_at d'origine", mine == [badge], show(mine))
+
+    one = f"/rest/v1/user_badges?user_id=eq.{A['id']}&badge_id=eq.first_exit"
+    status, res = call("PATCH", one, A["token"], {"earned_at": "2000-01-01T00:00:00Z"},
+                       {"Prefer": "return=representation"})
+    check("modification de son badge refusée", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
+    status, res = call("DELETE", one, A["token"], headers={"Prefer": "return=representation"})
+    check("suppression de son badge refusée", status in (401, 403), f"HTTP {status} {show(res)[:120]}")
+    check("le badge est toujours là, inchangé",
+          rows(f"/rest/v1/user_badges?user_id=eq.{A['id']}&select=*", A["token"]) == [badge])
+    status, res = call("POST", "/rest/v1/user_badges", A["token"], {"user_id": B["id"], "badge_id": "brick"})
+    check("A ne peut pas donner un badge à B", status == 403, f"HTTP {status} {show(res)[:120]}")
+    status, res = call("POST", "/rest/v1/user_badges", A["token"], {"badge_id": "brick", "user_book_id": ub_b["id"]})
+    check("A ne peut pas rattacher son badge à un livre de B", status == 403, f"HTTP {status} {show(res)[:120]}")
+    status, res = call("POST", "/rest/v1/user_badges", A["token"], {"badge_id": "Pas-Valide"})
+    check("badge_id hors format refusé", status == 400, f"HTTP {status} {show(res)[:120]}")
+
+    # Visibilité. Ici : A public, B privé, A suit B (accepté), B ne suit pas A.
+    status, res = call("POST", "/rest/v1/user_badges", B["token"], {"badge_id": "ten_out"},
+                       {"Prefer": "return=representation"})
+    check("B obtient un badge", status == 201 and res[0]["user_id"] == B["id"], f"HTTP {status} {show(res)[:120]}")
+    b_badges, b_profile = badges_of(B["id"], B["token"]), f"/rest/v1/profiles?id=eq.{B['id']}"
+    check("A voit les badges de B (B privé, follow accepté, jeu affiché)",
+          badges_of(B["id"], A["token"]) == b_badges == [{"badge_id": "ten_out"}], show(b_badges))
+    check("B voit les badges de A (A public, sans follow)", badges_of(A["id"], B["token"]) == [{"badge_id": "first_exit"}])
+    follow_ab = f"/rest/v1/follows?follower_id=eq.{A['id']}&following_id=eq.{B['id']}"
+    try:
+        call("PATCH", b_profile, B["token"], {"gamification_enabled": False})
+        check("B masque le jeu : A ne voit plus ses badges (follow accepté)", badges_of(B["id"], A["token"]) == [])
+        check("B masque le jeu : B voit toujours les siens", badges_of(B["id"], B["token"]) == b_badges)
+        call("PATCH", me, A["token"], {"gamification_enabled": False})
+        check("A masque le jeu : B ne voit plus ses badges (A public)", badges_of(A["id"], B["token"]) == [])
+        call("PATCH", me, A["token"], {"gamification_enabled": True})
+        call("PATCH", b_profile, B["token"], {"gamification_enabled": True})
+        call("DELETE", follow_ab, A["token"])
+        check("A ne suit plus B (privé) : A ne voit plus ses badges", badges_of(B["id"], A["token"]) == [])
+        call("POST", "/rest/v1/follows", A["token"], {"follower_id": A["id"], "following_id": B["id"]})
+        check("follow A→B pending : toujours rien", badges_of(B["id"], A["token"]) == [])
+        call("PATCH", follow_ab, B["token"], {"status": "accepted"})
+        check("follow A→B accepté : A revoit les badges de B", badges_of(B["id"], A["token"]) == b_badges)
+    finally:
+        call("PATCH", me, A["token"], {"gamification_enabled": True})
+        call("PATCH", b_profile, B["token"], {"gamification_enabled": True})
+    status, res = call("GET", "/rest/v1/user_badges?select=badge_id&limit=1")
+    check("user_badges refusée sans session", status in (401, 403) or res == [], f"HTTP {status} {show(res)[:120]}")
+
+
+def clear_test_badges():
+    sql(f"delete from public.user_badges where user_id in ('{A['id']}', '{B['id']}')", write=True)
+
+
+try:
+    section_gamification_sql()
+    clear_test_badges()
+    try:
+        section_gamification_rest()
+    finally:
+        clear_test_badges()
+except (RuntimeError, subprocess.TimeoutExpired, FileNotFoundError) as error:
+    check("contrôles gamification (CLI supabase requise)", False, str(error)[:300])
+except (KeyError, IndexError, TypeError, ValueError) as error:
+    check("section gamification interrompue par une réponse inattendue", False, repr(error)[:300])
 
 try:
     section_rate_limits()
