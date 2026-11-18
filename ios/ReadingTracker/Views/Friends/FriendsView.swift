@@ -23,7 +23,9 @@ struct FriendsView: View {
         if !social.activity.isEmpty {
           Section("Activité") {
             ForEach(social.activity) { activity in
-              ActivityRow(activity: activity)
+              NavigationLink(value: profile(of: activity)) {
+                ActivityRow(activity: activity)
+              }
             }
           }
         }
@@ -56,11 +58,21 @@ struct FriendsView: View {
       .refreshable {
         if let userId = auth.userId { await social.refresh(userId: userId) }
       }
+      .navigationDestination(for: Profile.self) { profile in
+        FriendProfileView(profile: profile)
+      }
       .sheet(isPresented: $showsFind) {
         FindFriendsView()
       }
       .errorAlert($social.errorMessage)
     }
+  }
+
+  /// Profil de l'auteur d'une activité : celui des abonnements s'il est chargé (avec son réglage du jeu).
+  private func profile(of activity: FriendActivity) -> Profile {
+    social.followingProfiles.first { $0.id == activity.userId }
+      ?? Profile(id: activity.userId, username: activity.username, displayName: activity.displayName,
+                 avatarUrl: activity.avatarUrl)
   }
 
   private func respond(to request: FollowRequest, accept: Bool) async {

@@ -6,6 +6,10 @@ struct Profile: Codable, Identifiable, Hashable, Sendable {
   var displayName: String?
   var avatarUrl: String?
   var isPrivate: Bool
+  /// Le jeu (jetons, badges, séries, célébrations) est affiché ; `false` le masque aussi aux amis.
+  var gamificationEnabled: Bool
+  /// Début du décompte des jetons et des mois au vert (`timestamptz`), non modifiable par le client.
+  var gamificationStartedAt: String?
   var createdAt: String?
 
   enum CodingKeys: String, CodingKey {
@@ -13,15 +17,22 @@ struct Profile: Codable, Identifiable, Hashable, Sendable {
     case displayName = "display_name"
     case avatarUrl = "avatar_url"
     case isPrivate = "is_private"
+    case gamificationEnabled = "gamification_enabled"
+    case gamificationStartedAt = "gamification_started_at"
     case createdAt = "created_at"
   }
 
-  init(id: UUID = UUID(), username: String, displayName: String? = nil, avatarUrl: String? = nil, isPrivate: Bool = false) {
+  init(
+    id: UUID = UUID(), username: String, displayName: String? = nil, avatarUrl: String? = nil, isPrivate: Bool = false,
+    gamificationEnabled: Bool = true, gamificationStartedAt: String? = nil
+  ) {
     self.id = id
     self.username = username
     self.displayName = displayName
     self.avatarUrl = avatarUrl
     self.isPrivate = isPrivate
+    self.gamificationEnabled = gamificationEnabled
+    self.gamificationStartedAt = gamificationStartedAt
   }
 
   init(from decoder: Decoder) throws {
@@ -31,6 +42,8 @@ struct Profile: Codable, Identifiable, Hashable, Sendable {
     displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
     avatarUrl = try c.decodeIfPresent(String.self, forKey: .avatarUrl)
     isPrivate = try c.decodeIfPresent(Bool.self, forKey: .isPrivate) ?? false
+    gamificationEnabled = try c.decodeIfPresent(Bool.self, forKey: .gamificationEnabled) ?? true
+    gamificationStartedAt = try c.decodeIfPresent(String.self, forKey: .gamificationStartedAt)
     createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt)
   }
 
@@ -38,6 +51,8 @@ struct Profile: Codable, Identifiable, Hashable, Sendable {
     if let displayName, !displayName.trimmingCharacters(in: .whitespaces).isEmpty { return displayName }
     return username
   }
+
+  var gamificationStartDate: Date? { PostgresDate.parse(gamificationStartedAt) }
 }
 
 enum FollowStatus: String, Codable, Sendable {

@@ -4,6 +4,8 @@ import Supabase
 
 /// Historique de la PAL (`user_book_events`) du compte et des amis suivis, avec les bilans du mois
 /// calculés ici dans le fuseau local, et objectif PAL du compte (`pal_goals`, privé).
+/// L'historique du compte est chargé en entier : le jeu en a besoin (ancienneté des livres dans la PAL,
+/// jetons et mois au vert depuis le début du décompte). Celui des amis se limite au mois en cours.
 /// La taille de la PAL vient de `LibraryService`.
 @MainActor
 @Observable
@@ -53,7 +55,7 @@ final class PALService {
       recordedDuringLoad = []
     }
     do {
-      async let mine = fetch(userIds: [userId], since: since)
+      async let mine = fetchHistory(userId: userId)
       async let friends = fetch(userIds: friendIds, since: since)
       async let ownGoal = fetchGoal(userId: userId)
       let (fetched, fetchedFriends, fetchedGoal) = try await (mine, friends, ownGoal)
@@ -124,6 +126,24 @@ final class PALService {
     } catch {
       if goal == nil { goal = previous }
       throw error
+    }
+  }
+
+  /// Tout l'historique du compte, par pages (PostgREST plafonne le nombre de lignes par réponse).
+  private func fetchHistory(userId: UUID) async throws -> [UserBookEvent] {
+    let pageSize = 1000
+    var all: [UserBookEvent] = []
+    while true {
+      let page: [UserBookEvent] = try await supabase.from("user_book_events")
+        .select()
+        .eq("user_id", value: userId)
+        .order("occurred_at")
+        .order("id")
+        .range(from: all.count, to: all.count + pageSize - 1)
+        .execute()
+        .value
+      all += page
+      if page.count < pageSize { return all }
     }
   }
 
