@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// Carte en tête de l'Accueil : taille de la PAL, bilan du mois, jeu (jetons et série), objectif et pioche.
+/// Carte en tête de l'Accueil : taille de la PAL, bilan du mois, jeu (défi à démarrer, ou places et série),
+/// objectif et pioche.
 struct PALCard: View {
   let size: Int
   let balance: PALBalance
@@ -52,7 +53,7 @@ struct PALCard: View {
       .accessibilityElement(children: .combine)
 
       if let game {
-        TokenLine(state: game)
+        GameLine(state: game)
       }
 
       if let goal {
@@ -119,7 +120,7 @@ struct PALCard: View {
         .multilineTextAlignment(.center)
       }
       if let game {
-        TokenLine(state: game)
+        GameLine(state: game)
       }
       Button("Ajouter un livre", action: onAdd)
         .buttonStyle(.glassProminent)
@@ -189,29 +190,70 @@ struct StreakLabel: View {
   }
 }
 
-/// Solde de jetons d'achat de la carte PAL. Toucher la ligne explique les règles.
-private struct TokenLine: View {
+/// Ligne du jeu de la carte PAL : l'invitation à démarrer le défi tant qu'il ne l'est pas, puis les places.
+private struct GameLine: View {
   let state: GameState
+
+  var body: some View {
+    if state.isStarted {
+      PlacesLine(places: state.places)
+    } else {
+      ChallengeInvite()
+    }
+  }
+}
+
+/// Invitation à démarrer le défi : ce qui se passe, et le bouton.
+private struct ChallengeInvite: View {
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(alignment: .firstTextBaseline, spacing: 10) {
+        Image(systemName: "flag.checkered")
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(.tint)
+          .frame(width: 22)
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Défi PAL")
+            .font(.subheadline.weight(.semibold))
+          Text(ChallengeText.explanation)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+      }
+      StartChallengeButton(style: .card)
+    }
+    .padding(12)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(Color(.tertiarySystemFill), in: .rect(cornerRadius: 14))
+  }
+}
+
+/// Places dans la PAL : « 2 places libres », « Aucune place libre », « PAL en débord de 3 ».
+/// Toucher la ligne explique les règles.
+private struct PlacesLine: View {
+  let places: PALPlaces
   @State private var showsRules = false
 
   var body: some View {
     Button { showsRules = true } label: {
       HStack(spacing: 10) {
-        Image(systemName: state.tokens.isOverdrawn ? "creditcard" : "bag.fill")
+        Image(systemName: symbol)
           .font(.subheadline.weight(.semibold))
-          .foregroundStyle(state.tokens.isOverdrawn ? AnyShapeStyle(.orange) : AnyShapeStyle(.tint))
+          .foregroundStyle(places.isOverflowing ? AnyShapeStyle(.orange) : AnyShapeStyle(.tint))
           .frame(width: 22)
         VStack(alignment: .leading, spacing: 1) {
-          Text(state.tokens.label)
+          Text(places.label)
             .font(.subheadline.weight(.medium))
             .foregroundStyle(.primary)
-            .multilineTextAlignment(.leading)
-          if state.isInstalling(at: .now) {
-            Text("Ajouts gratuits jusqu'au \(installationEnd)")
+            .monospacedDigit()
+          if let hint = places.nextPlaceHint {
+            Text(hint)
               .font(.caption)
               .foregroundStyle(.secondary)
           }
         }
+        .multilineTextAlignment(.leading)
         Spacer(minLength: 4)
         Image(systemName: "info.circle")
           .font(.footnote)
@@ -223,32 +265,28 @@ private struct TokenLine: View {
       .contentShape(.rect)
     }
     .buttonStyle(.plain)
-    .accessibilityHint("Explique les jetons")
+    .accessibilityHint("Explique les places")
     .popover(isPresented: $showsRules) {
-      TokenRules(installationEnd: state.isInstalling(at: .now) ? installationEnd : nil)
+      PlacesRules()
         .presentationCompactAdaptation(.popover)
     }
   }
 
-  private var installationEnd: String {
-    state.installationEndsAt.formatted(.dateTime.day().month(.wide).locale(Locale(identifier: "fr_FR")))
+  private var symbol: String {
+    if places.isOverflowing { return "arrow.up.circle.fill" }
+    return places.free > 0 ? "plus.circle.fill" : "equal.circle.fill"
   }
 }
 
-/// Règles des jetons, en quelques lignes.
-private struct TokenRules: View {
-  let installationEnd: String?
-
+/// Règles des places, en quelques lignes.
+private struct PlacesRules: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      Text("Jetons d'achat")
+      Text("Places dans ta PAL")
         .font(.headline)
-      rule("arrow.down.right", "Chaque livre qui sort de ta PAL rapporte ½ jeton.")
-      rule("arrow.up.right", "Chaque livre qui y entre en coûte 1.")
-      if let installationEnd {
-        rule("gift", "Jusqu'au \(installationEnd), tes ajouts sont gratuits : saisis ta PAL tranquillement.")
-      }
-      rule("hand.thumbsup", "À découvert, rien n'est bloqué : c'est juste un rappel.")
+      rule("arrow.down.right", "Deux livres qui sortent de ta PAL libèrent une place.")
+      rule("arrow.up.right", "Chaque livre qui y entre occupe une place.")
+      rule("hand.thumbsup", "Si ta PAL déborde, rien n'est bloqué : c'est juste un rappel.")
     }
     .padding(18)
     .frame(width: 300, alignment: .leading)

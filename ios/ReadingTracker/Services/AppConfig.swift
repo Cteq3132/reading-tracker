@@ -78,12 +78,21 @@ enum AppConfig {
     #endif
   }()
 
-  /// Variante de la démo pour les jetons : `-demo-tokens overdrawn` montre un solde « à découvert ».
-  static let demoTokens: String = {
+  /// Variante de la démo pour les places : `-demo-places overflow` montre une PAL « en débord ».
+  static let demoPlaces: String = {
     #if DEBUG
-    return UserDefaults.standard.string(forKey: "demo-tokens") ?? "positive"
+    return UserDefaults.standard.string(forKey: "demo-places") ?? "free"
     #else
-    return "positive"
+    return "free"
+    #endif
+  }()
+
+  /// Variante de la démo pour le défi : `-demo-challenge off` démarre avec un défi non démarré.
+  static let demoChallenge: String = {
+    #if DEBUG
+    return UserDefaults.standard.string(forKey: "demo-challenge") ?? "on"
+    #else
+    return "on"
     #endif
   }()
 

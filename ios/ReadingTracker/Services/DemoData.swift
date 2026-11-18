@@ -2,14 +2,16 @@ import Foundation
 
 /// Données d'exemple du mode démo (`-demo`, Debug uniquement) : permettent de vérifier le rendu sans backend.
 enum DemoData {
-  /// Mon profil. Le jeu a commencé il y a quatre mois (installation terminée) ; `-demo-game off` le masque.
+  /// Mon profil. Le défi a démarré il y a quatre mois ; `-demo-challenge off` le laisse à démarrer,
+  /// `-demo-game off` masque le jeu.
   static let me = Profile(
     id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
     username: "louis", displayName: "Louis",
-    gamificationEnabled: AppConfig.demoGame != "off", gamificationStartedAt: iso(gameStart)
+    gamificationEnabled: AppConfig.demoGame != "off",
+    gamificationStartedAt: AppConfig.demoChallenge == "off" ? nil : iso(gameStart)
   )
 
-  /// Début du décompte du jeu : le 1er du mois situé quatre mois avant le mois en cours.
+  /// Démarrage du défi : le 1er du mois situé quatre mois avant le mois en cours.
   static var gameStart: Date { monthDay(1, monthsAgo: 4) }
 
   static func day(_ daysAgo: Int) -> String {
@@ -218,12 +220,13 @@ enum DemoData {
   }
 
   /// Mon historique complet. Les entrées anciennes donnent l'ancienneté des livres dans la PAL ; le jeu
-  /// compte à partir de `gameStart` (installation de 14 jours) :
+  /// compte à partir de `gameStart` :
   /// - il y a 4 mois : 4 sorties, dont Madame Bovary, plus vieux livre de la PAL (5 ans) → au vert ;
-  /// - il y a 3 mois : 1 sortie, 1 entrée → pas au vert (avec `-demo-tokens overdrawn`, 4 entrées de plus) ;
+  /// - il y a 3 mois : 1 sortie, 1 entrée → pas au vert (avec `-demo-places overflow`, 5 entrées de plus) ;
   /// - il y a 2 mois : 3 sorties, 1 entrée ; le mois dernier : 2 sorties, 1 entrée → au vert ;
   /// - ce mois-ci : 2 entrées, 5 sorties (dont une suppression), et deux changements hors PAL : « +2 · −5 · −3 ».
-  /// Soit 15 sorties et 5 entrées payantes : 2 jetons ½, et une série de 3 mois au vert.
+  /// Soit 15 sorties et 5 entrées : ⌊15 ÷ 2⌋ − 5 = 2 places libres, encore 1 sortie pour la prochaine, et une
+  /// série de 3 mois au vert. Avec `-demo-places overflow` : 10 entrées, PAL en débord de 3.
   static var events: [UserBookEvent] {
     var id: Int64 = 0
     func e(_ title: String?, _ from: ReadingStatus?, _ to: ReadingStatus?, _ at: Date) -> UserBookEvent {
@@ -276,8 +279,8 @@ enum DemoData {
       e("Le Petit Prince", .reading, .read, thisMonth(14)),
       e("Le Mage du Kremlin", .toRead, .reading, thisMonth(15)),
     ]
-    if AppConfig.demoTokens == "overdrawn" {
-      history += (20...23).map { day in e(nil, nil, .toRead, monthDay(day, monthsAgo: 3)) }
+    if AppConfig.demoPlaces == "overflow" {
+      history += (20...24).map { day in e(nil, nil, .toRead, monthDay(day, monthsAgo: 3)) }
     }
     return history
   }
@@ -287,6 +290,8 @@ enum DemoData {
   /// Badges déjà enregistrés : ceux que l'historique de la démo fait obtenir. Restent à obtenir : Grand
   /// ménage, Pavé, Moitié moins, Objectif atteint et Coup de dé (que « Piocher dans ma PAL » fait gagner).
   static var earnedBadges: [UserBadge] {
+    // Défi non démarré : aucun badge encore.
+    guard AppConfig.demoChallenge != "off" else { return [] }
     let bovary = libraryItem("Madame Bovary").id
     func badge(_ badge: Badge, _ at: Date, _ book: UUID? = nil) -> UserBadge {
       UserBadge(userId: me.id, badgeId: badge.rawValue, earnedAt: iso(at), userBookId: book)

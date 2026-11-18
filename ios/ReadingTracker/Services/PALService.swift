@@ -5,7 +5,7 @@ import Supabase
 /// Historique de la PAL (`user_book_events`) du compte et des amis suivis, avec les bilans du mois
 /// calculés ici dans le fuseau local, et objectif PAL du compte (`pal_goals`, privé).
 /// L'historique du compte est chargé en entier : le jeu en a besoin (ancienneté des livres dans la PAL,
-/// jetons et mois au vert depuis le début du décompte). Celui des amis se limite au mois en cours.
+/// places et mois au vert depuis le démarrage du défi). Celui des amis se limite au mois en cours.
 /// La taille de la PAL vient de `LibraryService`.
 @MainActor
 @Observable

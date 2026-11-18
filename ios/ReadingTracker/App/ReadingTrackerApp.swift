@@ -107,9 +107,10 @@ struct MainTabView: View {
       await MainTabView.refreshAll(userId: userId, auth: auth, library: library, social: social, pal: pal, game: game)
       if let badge = AppConfig.demoCelebrate { game.showDemoCelebration(badge) }
     }
-    // Un objectif modifié ou le jeu réactivé peuvent faire obtenir un badge.
+    // Un objectif modifié, le jeu réactivé ou le défi démarré peuvent faire obtenir un badge.
     .onChange(of: pal.goal) { reevaluate() }
     .onChange(of: auth.profile?.gamificationEnabled) { reevaluate() }
+    .onChange(of: auth.profile?.gamificationStartedAt) { reevaluate() }
   }
 
   private func reevaluate() {

@@ -33,6 +33,8 @@ struct ProfileView: View {
 
         goalSection
 
+        challengeSection
+
         if GameService.isEnabled(auth.profile) {
           badgesSection
         }
@@ -117,17 +119,31 @@ struct ProfileView: View {
     )
   }
 
+  /// « Démarrer le défi », tant que le jeu est affiché et le défi pas encore démarré.
+  @ViewBuilder
+  private var challengeSection: some View {
+    if GameService.isEnabled(auth.profile), auth.profile?.hasStartedChallenge == false {
+      Section {
+        StartChallengeButton(style: .row)
+      } header: {
+        Text("Défi PAL")
+      } footer: {
+        Text(ChallengeText.explanation)
+      }
+    }
+  }
+
   private var gameSection: some View {
     Section {
       Toggle(isOn: gameBinding) {
         Label("Jeu", systemImage: "gamecontroller")
       }
-      .disabled(auth.profile?.gamificationStartDate == nil)
+      .disabled(auth.profile == nil)
     } footer: {
       Text(
         auth.profile?.gamificationEnabled == false
-          ? "Jetons, série, badges et célébrations sont masqués, pour toi comme pour tes amis."
-          : "Jetons d'achat, série de mois au vert, badges et célébrations. Tes amis voient tes badges."
+          ? "Places, série, badges et célébrations sont masqués, pour toi comme pour tes amis."
+          : "Places dans ta PAL, série de mois au vert, badges et célébrations. Tes amis voient tes badges."
       )
     }
   }

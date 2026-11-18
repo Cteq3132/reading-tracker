@@ -34,17 +34,18 @@ final class GameService {
 
   // MARK: État du jeu
 
-  /// Le jeu est affiché : réglage « Jeu » activé, et début du décompte connu (sinon le backend ne connaît pas
-  /// encore la gamification).
+  /// Le jeu est affiché : réglage « Jeu » activé. Le défi peut ne pas être démarré.
   static func isEnabled(_ profile: Profile?) -> Bool {
-    guard let profile else { return false }
-    return profile.gamificationEnabled && profile.gamificationStartDate != nil
+    profile?.gamificationEnabled == true
   }
 
-  /// État du jeu du compte, ou `nil` quand le jeu est masqué. Recalculé seulement quand l'historique, la
-  /// bibliothèque, l'objectif, le profil, les suggestions de la pioche ou l'heure changent.
+  /// État du jeu du compte, ou `nil` quand le jeu est masqué. Tant que le défi n'est pas démarré, l'état est
+  /// vide (`isStarted` faux) : rien ne compte. Recalculé seulement quand l'historique, la bibliothèque,
+  /// l'objectif, le profil, les suggestions de la pioche ou l'heure changent.
   func state(auth: AuthService, library: LibraryService, pal: PALService) -> GameState? {
-    guard Self.isEnabled(auth.profile), let startedAt = auth.profile?.gamificationStartDate else { return nil }
+    guard Self.isEnabled(auth.profile) else { return nil }
+    let startedAt = auth.profile?.gamificationStartDate
+    guard startedAt != nil else { return GameState() }
     let now = Date.now
     var hasher = Hasher()
     hasher.combine(startedAt)
@@ -53,7 +54,7 @@ final class GameService {
     hasher.combine(pal.goal?.target)
     hasher.combine(pal.goal?.startSize)
     hasher.combine(picks.map { [$0.userBookId.hashValue, $0.suggestedAt.hashValue] })
-    // Le mois en cours et la fin de l'installation dépendent de l'heure : une précision à la minute suffit.
+    // Le mois en cours dépend de l'heure : une précision à la minute suffit.
     hasher.combine(Int(now.timeIntervalSince1970 / 60))
     let key = hasher.finalize()
     if let cachedState, cachedState.key == key { return cachedState.state }

@@ -33,19 +33,18 @@ struct AddStatusMenu<MenuLabel: View>: View {
     }
   }
 
-  /// Sous-titre du choix : précision du statut, et pour la PAL, sa taille actuelle et le solde de jetons.
+  /// Sous-titre du choix : précision du statut, et pour la PAL, sa taille actuelle et les places.
   private func hint(for status: ReadingStatus) -> String {
     guard status == .toRead, existingStatus != .toRead else { return status.addHint }
     let size = "Je l'ai · ta PAL compte \(palSize) livre\(palSize > 1 ? "s" : "")"
-    guard let reminder = tokenReminder else { return size }
-    return "\(size) · \(reminder)"
+    guard let reminder = placesReminder else { return size }
+    return "\(size). \(reminder)"
   }
 
-  /// Rappel du solde de jetons, si le jeu est affiché : « 2 jetons », « à découvert », précisé d'un ajout
-  /// gratuit pendant la période d'installation.
-  private var tokenReminder: String? {
-    guard let state = game.state(auth: auth, library: library, pal: pal) else { return nil }
-    if state.isInstalling(at: .now) { return "\(state.tokens.shortLabel), ajout gratuit" }
-    return state.tokens.shortLabel
+  /// Rappel des places, si le jeu est affiché et le défi démarré : « Il te reste 2 places »,
+  /// « Ta PAL déborde déjà de 1 ».
+  private var placesReminder: String? {
+    guard let state = game.state(auth: auth, library: library, pal: pal), state.isStarted else { return nil }
+    return state.places.addReminder
   }
 }

@@ -6,9 +6,10 @@ struct Profile: Codable, Identifiable, Hashable, Sendable {
   var displayName: String?
   var avatarUrl: String?
   var isPrivate: Bool
-  /// Le jeu (jetons, badges, séries, célébrations) est affiché ; `false` le masque aussi aux amis.
+  /// Le jeu (places, badges, séries, célébrations) est affiché ; `false` le masque aussi aux amis.
   var gamificationEnabled: Bool
-  /// Début du décompte des jetons et des mois au vert (`timestamptz`), non modifiable par le client.
+  /// Démarrage du défi (`timestamptz`) ; `nil` tant que l'utilisateur ne l'a pas démarré. Posé uniquement
+  /// par la RPC `start_challenge()`.
   var gamificationStartedAt: String?
   var createdAt: String?
 
@@ -53,6 +54,8 @@ struct Profile: Codable, Identifiable, Hashable, Sendable {
   }
 
   var gamificationStartDate: Date? { PostgresDate.parse(gamificationStartedAt) }
+  /// Le défi est démarré : places, mois au vert et badges comptent à partir de `gamificationStartDate`.
+  var hasStartedChallenge: Bool { gamificationStartDate != nil }
 }
 
 enum FollowStatus: String, Codable, Sendable {
