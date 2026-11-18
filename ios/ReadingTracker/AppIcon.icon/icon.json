@@ -1,0 +1,72 @@
+{
+  "fill": {
+    "automatic-gradient": "srgb:0.85098,0.41961,0.23529,1.00000"
+  },
+  "fill-specializations": [
+    {
+      "appearance": "dark",
+      "value": {
+        "automatic-gradient": "srgb:0.13725,0.10588,0.09412,1.00000"
+      }
+    }
+  ],
+  "groups": [
+    {
+      "name": "2-livre",
+      "layers": [
+        {
+          "name": "2-livre",
+          "image-name": "2-livre.svg",
+          "glass": true,
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.96078,0.56078,0.38039,1.00000"
+              }
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.4
+      },
+      "specular": true
+    },
+    {
+      "name": "1-etagere",
+      "layers": [
+        {
+          "name": "1-etagere",
+          "image-name": "1-etagere.svg",
+          "glass": true,
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.96078,0.56078,0.38039,1.00000"
+              }
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.4
+      },
+      "specular": true
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}
