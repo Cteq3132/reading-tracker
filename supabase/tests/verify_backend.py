@@ -783,6 +783,9 @@ except (RuntimeError, subprocess.TimeoutExpired, FileNotFoundError) as error:
 
 
 # 9. Gamification ------------------------------------------------------------
+TEST_IDS = f"('{A['id']}', '{B['id']}')"  # comptes de test, pour les requêtes SQL
+
+
 def badges_of(user_id, token):
     return rows(f"/rest/v1/user_badges?user_id=eq.{user_id}&select=badge_id&order=badge_id", token)
 
@@ -808,23 +811,49 @@ def section_gamification_sql():
                                            "start_challenge": True}, show(by_role))
 
     # Inscription : sans défaut, et handle_new_user ne pose pas la colonne, donc
-    # un nouveau compte démarre à null. start_challenge est security definer
-    # avec un search_path vide, comme les autres RPC.
-    shape = sql("""
+    # un nouveau compte démarre à null.
+    column = sql("""
       select a.attnotnull as not_null,
              a.atthasdef as has_default,
              position('gamification_started_at' in pg_get_functiondef('public.handle_new_user()'::regprocedure)) = 0
-               as not_in_trigger,
-             f.prosecdef as security_definer,
+               as not_in_trigger
+        from pg_attribute a
+       where a.attrelid = 'public.profiles'::regclass and a.attname = 'gamification_started_at'""")
+    check("inscription : gamification_started_at nullable et sans défaut, absent de handle_new_user, "
+          "donc null pour un nouveau compte",
+          column == [{"not_null": False, "has_default": False, "not_in_trigger": True}], show(column))
+    rpc = sql("""
+      select f.prosecdef as security_definer,
              f.proconfig as config,
              f.prorettype = 'timestamptz'::regtype as returns_timestamptz
-        from pg_attribute a, pg_proc f
-       where a.attrelid = 'public.profiles'::regclass and a.attname = 'gamification_started_at'
-         and f.oid = 'public.start_challenge()'::regprocedure""")
-    check("gamification_started_at nullable et sans défaut, absent de handle_new_user ; start_challenge() "
-          "security definer, search_path fixé, renvoie timestamptz",
-          shape == [{"not_null": False, "has_default": False, "not_in_trigger": True, "security_definer": True,
-                     "config": ["search_path=\"\""], "returns_timestamptz": True}], show(shape))
+        from pg_proc f
+       where f.oid = 'public.start_challenge()'::regprocedure""")
+    check("start_challenge() : security definer, search_path fixé, renvoie timestamptz",
+          rpc == [{"security_definer": True, "config": ["search_path=\"\""], "returns_timestamptz": True}], show(rpc))
+
+    # Comptes existants remis à null par la migration. Avant elle, au moins trois
+    # profils partageaient l'heure de la migration gamification, et chaque
+    # compte plus récent avait gamification_started_at = created_at. Depuis,
+    # seule start_challenge() pose une date : son now() est propre à chaque
+    # appel, et toujours postérieur à l'inscription. Il ne doit donc rester
+    # aucune date partagée ni aucune date égale à created_at.
+    started = sql("""
+      select count(*)::int as profiles,
+             count(gamification_started_at)::int as started,
+             count(*) filter (where gamification_started_at = created_at)::int as at_signup,
+             coalesce((select max(n) from (select count(*)::int as n from public.profiles
+                                            where gamification_started_at is not null
+                                            group by gamification_started_at) g), 0) as max_shared
+        from public.profiles""")
+    print("défis en base :", show(started))
+    check("comptes existants remis à null : aucune date de défi partagée ni égale à l'inscription",
+          started and started[0]["profiles"] >= 3 and started[0]["at_signup"] == 0 and started[0]["max_shared"] <= 1,
+          show(started))
+    # A et B, avant toute remise à zéro par ce lancement : null par la migration
+    # au premier lancement, puis par le nettoyage du lancement précédent.
+    ab = sql(f"select gamification_started_at from public.profiles where id in {TEST_IDS}")
+    check("A et B non démarrés au départ du lancement (avant la remise à zéro du script)",
+          ab == [{"gamification_started_at": None}] * 2, show(ab))
 
 
 def section_gamification_rest():
@@ -833,7 +862,7 @@ def section_gamification_rest():
     b_game = f"/rest/v1/profiles?id=eq.{B['id']}&select=gamification_started_at"
     profile = rows(a_game, A["token"])[0]
     print("gamification de A :", show(profile))
-    check("profil : gamification_enabled vrai par défaut, défi non démarré (gamification_started_at null)",
+    check("profil lu par l'API : gamification_enabled vrai, défi non démarré (gamification_started_at null)",
           profile["gamification_enabled"] is True and profile["gamification_started_at"] is None, show(profile))
 
     # Écriture directe refusée, que le défi soit démarré ou non, et quelle que
@@ -858,7 +887,7 @@ def section_gamification_rest():
     status, started = call("POST", "/rest/v1/rpc/start_challenge", A["token"], {})
     stored = rows(a_game, A["token"])[0]["gamification_started_at"]
     print(f"start_challenge par A → HTTP {status}, {show(started)} ; en base : {stored}")
-    check("start_challenge() pose la date du jour et la renvoie",
+    check("start_challenge() pose l'instant de l'appel (à 2 min près de l'horloge locale) et le renvoie",
           status == 200 and isinstance(started, str) and stored is not None
           and parse_ts(started) == parse_ts(stored) and abs((parse_ts(started) - t0).total_seconds()) < 120,
           f"HTTP {status} {show(started)} {stored}")
@@ -867,9 +896,12 @@ def section_gamification_rest():
     check("second appel : même date renvoyée, le défi ne redémarre pas",
           status == 200 and isinstance(again, str) and parse_ts(again) == parse_ts(started)
           and rows(a_game, A["token"])[0]["gamification_started_at"] == stored, f"HTTP {status} {show(again)}")
+    b_started = rows(b_game, B["token"])
     check("start_challenge() de A ne touche pas B (toujours non démarré)",
-          rows(b_game, B["token"]) == [{"gamification_started_at": None}], show(rows(b_game, B["token"])))
-    check("A lit la date de défi de B (null) comme le reste du profil", rows(b_game, A["token"]) == rows(b_game, B["token"]))
+          b_started == [{"gamification_started_at": None}], show(b_started))
+    a_seen_by_b = rows(a_profile + "&select=gamification_started_at", B["token"])
+    check("B lit la date de défi de A, comme le reste du profil (lecture pour tout compte connecté)",
+          a_seen_by_b == [{"gamification_started_at": stored}], show(a_seen_by_b))
 
     refuse_direct_writes("défi démarré")
     profile = rows(a_game, A["token"])[0]
@@ -968,11 +1000,9 @@ def section_gamification_rest():
 
 def reset_test_gamification():
     """Badges des comptes de test, défi non démarré, et historique orphelin du livre supprimé."""
-    sql(f"delete from public.user_badges where user_id in ('{A['id']}', '{B['id']}')", write=True)
-    sql(f"update public.profiles set gamification_started_at = null where id in ('{A['id']}', '{B['id']}')",
-        write=True)
-    sql(f"delete from public.user_book_events where user_book_id is null "
-        f"and user_id in ('{A['id']}', '{B['id']}')", write=True)
+    sql(f"delete from public.user_badges where user_id in {TEST_IDS}", write=True)
+    sql(f"update public.profiles set gamification_started_at = null where id in {TEST_IDS}", write=True)
+    sql(f"delete from public.user_book_events where user_book_id is null and user_id in {TEST_IDS}", write=True)
 
 
 try:
