@@ -29,9 +29,11 @@ Toute évolution du schéma ou de l'API se fait ici d'abord.
 | display_name | text | |
 | avatar_url | text | |
 | is_private | bool default false | privé ⇒ les follows passent par une demande |
+| gamification_enabled | bool not null default true | le jeu (jetons, badges, séries, célébrations) est affiché ; `false` le masque aussi aux amis |
+| gamification_started_at | timestamptz not null default now() | début du décompte des jetons et des mois au vert ; vaut `now()` à la migration pour les comptes existants, et l'heure d'inscription pour les nouveaux ; non modifiable par le client |
 | created_at | timestamptz | |
 
-RLS : lecture pour tout utilisateur connecté ; mise à jour de sa propre ligne seulement.
+RLS : lecture pour tout utilisateur connecté ; mise à jour de sa propre ligne seulement (sauf `gamification_started_at`).
 
 ### `pal_goals` — objectif PAL, privé
 | colonne | type | note |
@@ -133,6 +135,51 @@ Colonnes : `user_book_id, user_id, username, display_name, avatar_url, book_id, 
 ### RPC
 - `upsert_book(book jsonb) returns uuid` (security definer) : prend un candidat au format renvoyé par `search-books`. Elle déduplique sur `isbn13`, sinon sur `(source, source_id)`, complète les champs vides d'une fiche existante sans écraser ceux qui sont remplis, et renvoie l'id.
 
+### `user_badges` — badges obtenus
+| colonne | type | note |
+|---|---|---|
+| user_id | uuid not null default `auth.uid()` | FK profiles, cascade |
+| badge_id | text not null | identifiant du catalogue de l'app (voir « Gamification ») |
+| earned_at | timestamptz not null default now() | |
+| user_book_id | uuid | FK user_books, `on delete set null` ; le livre qui a déclenché le badge, s'il y en a un |
+
+PK `(user_id, badge_id)` : un badge ne s'obtient qu'une fois. `badge_id` respecte `^[a-z0-9_]{2,40}$`.
+RLS : le propriétaire peut lire et insérer ses lignes, pas les modifier ni les supprimer. En lecture, les autres voient les badges d'un compte seulement si son `gamification_enabled` est vrai et s'il est public ou suivi avec un follow `accepted`.
+Le calcul des badges se fait dans l'app, qui insère les badges obtenus (`insert … on conflict do nothing`). Le serveur ne vérifie pas les règles : un badge est déclaratif, sans enjeu au-delà de l'affichage.
+
+## Gamification
+
+Le jeu porte sur ce qui **sort** de la PAL, jamais sur la quantité lue. Rien ne punit : pas de série perdue mise en avant, et tout disparaît si `gamification_enabled` est faux (réglage dans le Profil). Tout se calcule dans l'app, dans le fuseau local, à partir de `user_book_events` postérieurs à `gamification_started_at`.
+
+**Paires neutralisées (anti-triche)** : une entrée en PAL suivie d'une sortie du même `user_book_id` (ou du même `book_id` si la ligne a été supprimée) en moins de 24 h ne compte ni comme entrée ni comme sortie.
+
+**Jetons d'achat**
+- Chaque sortie de PAL rapporte ½ jeton : vers `reading`, `read`, `abandoned`, `released`, ou suppression d'une ligne `to_read`.
+- Chaque entrée en PAL coûte 1 jeton : insertion en `to_read`, ou passage d'un autre statut vers `to_read`.
+- **Période d'installation** : les entrées des 14 premiers jours après `gamification_started_at` ne coûtent rien, pour que l'on puisse saisir sa PAL existante sans partir dans le rouge.
+- Solde = sorties × 0,5 − entrées. Affiché sur la carte PAL de l'Accueil (« 2 jetons : tu peux t'offrir 2 livres », arrondi à l'inférieur ; « ½ jeton » quand il reste une demie). Un solde négatif s'affiche « à découvert », avec humour, sans rien bloquer. Au moment d'ajouter un livre en PAL, l'app rappelle le solde.
+
+**Mois au vert** : un mois civil (fuseau local) où les sorties dépassent les entrées, paires neutralisées exclues, période d'installation exclue des entrées. La série courante = nombre de mois au vert consécutifs jusqu'au mois précédent, plus le mois en cours s'il est déjà au vert. Affichée discrètement sur la carte PAL (« 🔥 4 mois au vert ») ; une série à 0 n'est pas affichée.
+
+**Catalogue des badges** (identifiants stables, libellés en français dans l'app) :
+| `badge_id` | nom | règle |
+|---|---|---|
+| `first_exit` | Premier pas | première sortie de PAL |
+| `bottom_of_pile` | Fond de pile | passer en `reading` ou `read` le livre `to_read` le plus ancien de la PAL à cet instant |
+| `archaeologist` | Archéologue | sortir un livre resté plus de 2 ans en `to_read` |
+| `big_cleanup` | Grand ménage | 5 livres `released` dans le même mois civil |
+| `brick` | Pavé | finir (`read`) un livre de plus de 600 pages |
+| `green_month` | Mois au vert | premier mois au vert |
+| `green_streak_3` | Trois à la suite | série de 3 mois au vert |
+| `half_pile` | Moitié moins | taille de la PAL ≤ moitié de `pal_goals.start_size` (avec un `start_size` ≥ 4) |
+| `goal_reached` | Objectif atteint | taille de la PAL ≤ `pal_goals.target` |
+| `ten_out` | Dix de moins | 10 sorties de PAL au total |
+| `pick_accepted` | Coup de dé | commencer dans les 7 jours un livre proposé par « Piocher dans ma PAL » (mémorisé localement) |
+
+Les badges se calculent après chaque changement de statut et au lancement ; les badges historiques ne sont attribués qu'à partir des événements postérieurs à `gamification_started_at`.
+
+**Célébrations** (app seulement) : confettis légers et retour haptique quand on finit un livre, quand on en libère un, quand on obtient un badge (avec une carte du badge) et quand l'objectif est atteint. Respecter « Réduire les animations » d'iOS.
+
 ## Edge Function `search-books`
 
 `POST /functions/v1/search-books` avec un JWT utilisateur (verify_jwt activé).
@@ -217,3 +264,4 @@ Supabase Auth applique ses propres limites par IP (`[auth.rate_limit]` dans `sup
 - Onglets : **Accueil** (date et salut ; carte PAL en tête : taille actuelle, entrées, sorties et solde du mois, progression de l'objectif ; « Piocher dans ma PAL » : au hasard, le plus ancien ou le plus court, puis « Commencer » ; lectures en cours avec mise à jour rapide de la page ; 3 dernières activités des amis, dont leurs progrès de PAL), **Bibliothèque** (En cours / PAL / Envies / Lus / Abandonnés et libérés ; dans la PAL : ancienneté de chaque livre, tri par ancienneté ou par nombre de pages, action « Libérer »), **Amis** (activité, recherche de comptes, demandes), **Profil**. **Ajouter** (recherche et scan ISBN) est l'onglet de recherche iOS 26 (`Tab(role: .search)`), affiché à part dans la tab bar ; l'Accueil y mène aussi.
 - À l'ajout d'un livre, l'app demande son statut : PAL (je l'ai), Envies, En cours ou Lu ; en choisissant PAL, elle rappelle discrètement la taille actuelle de la PAL.
 - Objectif PAL : réglable dans le Profil (taille visée, échéance facultative).
+- Gamification (voir la section dédiée) : jetons et série de mois au vert sur la carte PAL de l'Accueil ; badges obtenus et à obtenir dans le Profil, et ceux d'un ami sur son profil ; réglage « Jeu » dans le Profil pour tout masquer.
